@@ -1,5 +1,7 @@
 module TOFtwin
 
-# Write your package code here.
+include("detectors_coverage.jl")
+
+export DetectorPixel, pixels_from_coverage
 
 end
