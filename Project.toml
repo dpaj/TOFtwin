@@ -3,7 +3,11 @@ uuid = "fb4c2347-ef67-4041-8618-d5a4cc5ca4d8"
 authors = ["Daniel Pajerowski <daniel@pajerowski.com> and contributors"]
 version = "1.0.0-DEV"
 
+[deps]
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
 [compat]
+StaticArrays = "1.9.15"
 julia = "1.10.10"
 
 [extras]

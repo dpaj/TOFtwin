@@ -1,5 +1,3 @@
-module TOFtwin
-
 using StaticArrays
 const Vec3 = SVector{3,Float64}
 
@@ -59,5 +57,3 @@ function pixels_from_coverage(; L2=3.5,
 
     return pix
 end
-
-end # module
