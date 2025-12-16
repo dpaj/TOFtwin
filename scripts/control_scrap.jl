@@ -3,6 +3,7 @@ cd("/maiqmag/vdp/TOFtwin")
 Pkg.activate("/maiqmag/vdp/TOFtwin")
 Pkg.add(["Random", "StaticArrays", "GLMakie", "CairoMakie"])
 Pkg.add("Revise")
+Pkg.add("Interpolations")
 Pkg.add("LinearAlgebra")
 using Revise
 

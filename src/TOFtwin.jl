@@ -15,6 +15,9 @@ include("forward_predict.jl")
 
 include("models_toy.jl")
 
+include("powder_coverage.jl")
+
+
 export Vec3, DetectorPixel, pixels_from_coverage, summarize_pixels
 export DetectorBank, bank_from_coverage
 export PixelSampler, AllPixels, RandomSubset, Stride, StratifiedByEta, AngularDecimate, ByBank
@@ -33,5 +36,11 @@ export predict_hist_Qω_powder
 export predict_pixel_tof, normalize_by_vanadium, reduce_pixel_tof_to_Qω_powder
 
 export ToyModePowder
+
+export predict_powder_mean_Qω
+
+export coverage_points_Qω, suggest_sunny_powder_axes
+export GridKernelPowder, kernel_from_function
+
 
 end

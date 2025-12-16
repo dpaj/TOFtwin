@@ -126,3 +126,58 @@ function reduce_pixel_tof_to_Qω_powder(inst::Instrument;
 
     return H
 end
+
+"""
+Conventional powder workflow:
+
+model(Qmag, ω)  -> detector×TOF -> vanadium normalize -> reduce to (|Q|,ω)
+and return the *mean per (Q,ω) bin* plus the per-bin weights (coverage).
+
+Returns a NamedTuple:
+  (Hraw, Hsum, Hwt, Hmean)
+
+where each is a Hist2D (same edges).
+"""
+function predict_powder_mean_Qω(inst::Instrument;
+    pixels::Vector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::Vector{Float64},
+    Q_edges::Vector{Float64},
+    ω_edges::Vector{Float64},
+    model,
+    eps::Float64 = 1e-12)
+
+    # detector×TOF prediction for sample + "vanadium"
+    Cs = predict_pixel_tof(inst; pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s, model=model)
+    Cv = predict_pixel_tof(inst; pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s, model=(Q,ω)->1.0)
+
+    # raw reduced sum (debug)
+    Hraw = reduce_pixel_tof_to_Qω_powder(inst;
+        pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+        C=Cs, Q_edges=Q_edges, ω_edges=ω_edges
+    )
+
+    # vanadium-normalized in detector×TOF
+    Cnorm = normalize_by_vanadium(Cs, Cv; eps=eps)
+
+    # reduce the normalized values: this is a SUM over contributions
+    Hsum = reduce_pixel_tof_to_Qω_powder(inst;
+        pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+        C=Cnorm, Q_edges=Q_edges, ω_edges=ω_edges
+    )
+
+    # per-bin weights/coverage (number of contributing detector×TOF samples)
+    W = zeros(size(Cnorm))
+    W[Cv .> 0.0] .= 1.0
+
+    Hwt = reduce_pixel_tof_to_Qω_powder(inst;
+        pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+        C=W, Q_edges=Q_edges, ω_edges=ω_edges
+    )
+
+    reopening = Hist2D(Q_edges, ω_edges)  # helper to make Hmean with same edges
+    reopening.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
+    Hmean = reopening
+
+    return (Hraw=Hraw, Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
+end
