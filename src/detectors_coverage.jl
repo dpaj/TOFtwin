@@ -57,3 +57,25 @@ function pixels_from_coverage(; L2=3.5,
 
     return pix
 end
+
+"Summarize pixel cloud and infer (ψ, η) ranges from positions."
+function summarize_pixels(pix::Vector{DetectorPixel})
+    pts = getfield.(pix, :r_L)
+    xs  = getindex.(pts, 1)
+    ys  = getindex.(pts, 2)
+    zs  = getindex.(pts, 3)
+
+    # inferred angles from position
+    ψ = atan.(xs, zs)                           # horizontal angle about +y, ψ=0 at +z
+    ρ = sqrt.(xs.^2 .+ zs.^2)
+    η = atan.(ys, ρ)                            # elevation
+
+    return (
+        N = length(pix),
+        x = (minimum(xs), maximum(xs)),
+        y = (minimum(ys), maximum(ys)),
+        z = (minimum(zs), maximum(zs)),
+        ψ_deg = (rad2deg(minimum(ψ)), rad2deg(maximum(ψ))),
+        η_deg = (rad2deg(minimum(η)), rad2deg(maximum(η))),
+    )
+end

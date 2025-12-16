@@ -10,3 +10,4 @@ using TOFtwin
 #using .TOFtwin
 pix = TOFtwin.pixels_from_coverage(L2=3.5, surface=:cylinder)
 length(pix)
+TOFtwin.summarize_pixels(pix)

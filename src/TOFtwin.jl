@@ -2,6 +2,6 @@ module TOFtwin
 
 include("detectors_coverage.jl")
 
-export DetectorPixel, pixels_from_coverage
+export DetectorPixel, pixels_from_coverage, summarize_pixels
 
 end
