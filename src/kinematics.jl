@@ -64,14 +64,14 @@ function Q_L_from_pixel(r_pix_L::Vec3, Ei::Float64, Ef::Float64; r_samp_L::Vec3=
     return Q
 end
 
-"""
-Compute Q in sample frame using a Pose.
-
-Assumes sample position is at origin in sample frame; you can add sample offsets later.
-"""
-function Q_S_from_pixel(r_pix_L::Vec3, Ei::Float64, Ef::Float64, pose::Pose)
-    Q_L = Q_L_from_pixel(r_pix_L, Ei, Ef)
-    # Q is a vector, so transform with rotation only:
-    R_SL = T_SL(pose).R
-    return R_SL * Q_L
+"Derivative dω/dt (meV/s) for fixed Ei, L1, L2 at time t."
+function dω_dt(L1::Float64, L2::Float64, Ei::Float64, t::Float64)
+    vi = v_from_EmeV(Ei)
+    t0 = L1 / vi
+    τ  = t - t0
+    τ <= 0 && throw(ArgumentError("t must be > L1/vi"))
+    vf = L2 / τ
+    Ef = (vf / V_PER_SQRT_E)^2
+    # ω = Ei - Ef  => dω/dt = -dEf/dt = 2 Ef / τ
+    return 2.0 * Ef / τ
 end

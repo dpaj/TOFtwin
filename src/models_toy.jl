@@ -11,4 +11,9 @@ struct ToyModePowder
     amp::Float64
 end
 
-(m::ToyModePowder)(Qmag::Float64, ω::Float64) = m.amp * exp(-0.5*((ω - (m.Δ + m.v*Qmag))/m.σ)^2)
+# keyword constructor (convenience)
+ToyModePowder(; Δ::Float64, v::Float64, σ::Float64, amp::Float64=1.0) =
+    ToyModePowder(Δ, v, σ, amp)
+
+(m::ToyModePowder)(Qmag::Float64, ω::Float64) =
+    m.amp * exp(-0.5*((ω - (m.Δ + m.v*Qmag))/m.σ)^2)
