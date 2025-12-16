@@ -123,7 +123,8 @@ heatmap!(ax3, Q_cent, ω_cent, wt_log)
 
 ax4 = Axis(fig[2,2], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin vanadium-normalized MEAN + kernel contours")
 heatmap!(ax4, Q_cent, ω_cent, mean_map)
-contour!(ax4, Q_cent, ω_cent, kernel_grid)
+#contour!(ax4, Q_cent, ω_cent, kernel_grid)
+contour!(ax4, Q_cent, ω_cent, kernel_grid; color=:white, linewidth=1.0)
 
 save(joinpath(outdir, "demo_powder_from_sunny.png"), fig)
 @info "Wrote $(joinpath(outdir, "demo_powder_from_sunny.png"))"
