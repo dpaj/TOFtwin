@@ -64,6 +64,13 @@ function Q_L_from_pixel(r_pix_L::Vec3, Ei::Float64, Ef::Float64; r_samp_L::Vec3=
     return Q
 end
 
+"Sample-frame Q using pose rotation (vector => rotation only)."
+function Q_S_from_pixel(r_pix_L::Vec3, Ei_meV::Float64, Ef_meV::Float64, pose::Pose; r_samp_L::Vec3=Vec3(0,0,0))
+    Q_L = Q_L_from_pixel(r_pix_L, Ei_meV, Ef_meV; r_samp_L=r_samp_L)
+    R_SL = T_SL(pose).R
+    return R_SL * Q_L
+end
+
 "Derivative dω/dt (meV/s) for fixed Ei, L1, L2 at time t."
 function dω_dt(L1::Float64, L2::Float64, Ei::Float64, t::Float64)
     vi = v_from_EmeV(Ei)
