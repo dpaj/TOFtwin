@@ -1,5 +1,6 @@
 using StaticArrays
 using LinearAlgebra
+import LinearAlgebra: inv   # <-- add this line
 
 const Vec3 = SVector{3,Float64}
 const Mat3 = SMatrix{3,3,Float64,9}

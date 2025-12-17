@@ -2,6 +2,7 @@ using LinearAlgebra
 using StaticArrays
 
 const Vec3 = SVector{3,Float64}
+const Mat3 = SMatrix{3,3,Float64,9}
 
 """
 Crystal lattice parameters (Å, degrees).
@@ -24,6 +25,13 @@ struct ReciprocalLattice
     bstar::Vec3
     cstar::Vec3
 end
+
+"HKL -> Q matrix with columns [a* b* c*] (Å⁻¹)."
+B_matrix(recip::ReciprocalLattice) = Mat3(hcat(recip.astar, recip.bstar, recip.cstar))
+
+"Convert (H,K,L) to Q (Å⁻¹)."
+Q_from_hkl(recip::ReciprocalLattice, hkl::Vec3) = B_matrix(recip) * hkl
+
 
 deg2radf(x) = (π/180.0) * x
 
@@ -56,7 +64,8 @@ end
 
 "Convert Q (Å⁻¹) to (H,K,L) using reciprocal basis."
 function hkl_from_Q(recip::ReciprocalLattice, Q::Vec3)
-    M = hcat(recip.astar, recip.bstar, recip.cstar)  # 3×3
-    hkl = M \ collect(Q)
-    return Vec3(hkl[1], hkl[2], hkl[3])
+    B = B_matrix(recip)
+    # B is a StaticArrays Mat3, but "\" is happier with Matrix sometimes:
+    h = (Matrix(B) \ collect(Q))
+    return Vec3(h[1], h[2], h[3])
 end

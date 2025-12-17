@@ -28,13 +28,13 @@ lp = LatticeParams(8.5031, 8.5031, 8.5031, 90.0, 90.0, 90.0)
 recip = reciprocal_lattice(lp)
 
 # HKL kernel (toy)
-toy = ToyCosineHKL()#q0=TVec3(1.0, 0.0, 0.0), Δ=2.0, v=3.0, σE=0.25, σQ=0.18, amp=1.0)
+toy = ToyCosineHKL()#ToyGaussianDispHKL(q0=TVec3(1.0, 0.0, 0.0), Δ=2.0, v=3.0, σE=0.25, σQ=0.18, amp=1.0)
 model_hkl = (hkl, ω) -> toy(hkl, ω)
 
 # Goniometer scan: rotate sample about lab +y by angles (degrees)
 # IMPORTANT: Q_S = R_SL * Q_L. If the sample is rotated by +θ in lab,
 # then R_SL is typically rot_y(-θ) (inverse rotation).
-angles_deg = -180:2:180
+angles_deg = 0:0.5:90
 angles = deg2rad.(collect(angles_deg))
 R_SL_list = [Ry(-θ) for θ in angles]
 
@@ -42,7 +42,7 @@ R_SL_list = [Ry(-θ) for θ in angles]
 H_edges = collect(range(-2.0, 2.0; length=260))
 ω_edges = collect(range(-2.0, Ei; length=260))
 
-pred = predict_cut_weightedmean_Hω_hkl_scan(inst;
+pred = predict_cut_mean_Hω_hkl_scan(inst;
     pixels=pix_used,
     Ei_meV=Ei,
     tof_edges_s=tof_edges,
@@ -52,7 +52,7 @@ pred = predict_cut_weightedmean_Hω_hkl_scan(inst;
     R_SL_list=R_SL_list,
     model_hkl=model_hkl,
     K_center=0.0, K_halfwidth=0.1,
-    L_center=0.0, L_halfwidth=0.1   # keep wide initially
+    L_center=0.0, L_halfwidth=10.0   # keep wide initially
 )
 
 H_cent = 0.5 .* (H_edges[1:end-1] .+ H_edges[2:end])

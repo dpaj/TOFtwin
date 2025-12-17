@@ -255,3 +255,89 @@ function predict_cut_weightedmean_Hω_hkl_scan(inst::Instrument;
 
     return (Hnum=Hnum, Hden=Hden, Hmean=Hmean)
 end
+
+function predict_cut_mean_Hω_hkl(inst::Instrument;
+    pixels::Vector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::Vector{Float64},
+    H_edges::Vector{Float64},
+    ω_edges::Vector{Float64},
+    recip::ReciprocalLattice,
+    R_SL,                    # Q_S = R_SL * Q_L
+    model_hkl,
+    eps::Float64=1e-12,
+    K_center::Float64=0.0,
+    K_halfwidth::Float64=0.15,
+    L_center::Float64=0.0,
+    L_halfwidth::Float64=10.0)
+
+    Hsum = Hist2D(H_edges, ω_edges)   # sum of normalized samples
+    Hwt  = Hist2D(H_edges, ω_edges)   # number of samples (weights)
+    n_tof = length(tof_edges_s) - 1
+
+    for p in pixels
+        L2p = L2(inst, p.id)
+        for it in 1:n_tof
+            t = 0.5*(tof_edges_s[it] + tof_edges_s[it+1])
+
+            Ef = try
+                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
+            catch
+                continue
+            end
+            (Ef <= 0 || Ef > Ei_meV) && continue
+
+            Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+            Q_S = R_SL * Q_L
+            hkl = hkl_from_Q(recip, Q_S)
+
+            Hh, Kk, Ll = hkl
+            (abs(Kk - K_center) > K_halfwidth) && continue
+            (abs(Ll - L_center) > L_halfwidth) && continue
+
+            val = model_hkl(hkl, ω)  # already "vanadium-normalized" in spirit
+            deposit_bilinear!(Hsum, Hh, ω, val)
+            deposit_bilinear!(Hwt,  Hh, ω, 1.0)
+        end
+    end
+
+    Hmean = Hist2D(H_edges, ω_edges)
+    Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
+    return (Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
+end
+
+function predict_cut_mean_Hω_hkl_scan(inst::Instrument;
+    pixels::Vector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::Vector{Float64},
+    H_edges::Vector{Float64},
+    ω_edges::Vector{Float64},
+    recip::ReciprocalLattice,
+    R_SL_list::Vector,
+    model_hkl,
+    eps::Float64=1e-12,
+    K_center::Float64=0.0,
+    K_halfwidth::Float64=0.15,
+    L_center::Float64=0.0,
+    L_halfwidth::Float64=10.0)
+
+    Hsum = Hist2D(H_edges, ω_edges)
+    Hwt  = Hist2D(H_edges, ω_edges)
+
+    for R_SL in R_SL_list
+        tmp = predict_cut_mean_Hω_hkl(inst;
+            pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+            H_edges=H_edges, ω_edges=ω_edges,
+            recip=recip, R_SL=R_SL, model_hkl=model_hkl,
+            eps=eps,
+            K_center=K_center, K_halfwidth=K_halfwidth,
+            L_center=L_center, L_halfwidth=L_halfwidth
+        )
+        Hsum.counts .+= tmp.Hsum.counts
+        Hwt.counts  .+= tmp.Hwt.counts
+    end
+
+    Hmean = Hist2D(H_edges, ω_edges)
+    Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
+    return (Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
+end

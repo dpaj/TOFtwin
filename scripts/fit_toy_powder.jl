@@ -104,3 +104,8 @@ v̂ = x̂[2]
 @info "true  Δ=$(ptrue.Δ) v=$(ptrue.v) σ=$(ptrue.σ)"
 @info "fit   Δ=$Δ̂ v=$v̂ σ=$σ̂"
 @info "status $(Optim.converged(res))  f=$(Optim.minimum(res))"
+
+
+nd = count(mask)
+np = 3  # Δ, v, logσ (scale/offset handled analytically)
+@info "chi2_red = $(Optim.minimum(res) / (nd - np))  (nd=$nd)"
