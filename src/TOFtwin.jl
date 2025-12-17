@@ -18,10 +18,12 @@ include("models_toy.jl")
 include("powder_coverage.jl")
 
 include("lattice.jl")
-include("single_crystal.jl")
 
 include("alignment.jl")
 
+include("single_crystal.jl")
+
+include("goniometer.jl")
 
 export Vec3, DetectorPixel, pixels_from_coverage, summarize_pixels
 export DetectorBank, bank_from_coverage
@@ -56,10 +58,12 @@ export predict_cut_weightedmean_Hω_hkl_scan
 
 export predict_cut_mean_Hω_hkl, predict_cut_mean_Hω_hkl_scan
 
+export predict_cut_mean_Hω_hkl_scan_aligned
 
 export SampleAlignment, SampleAlignment_from_UB, alignment_from_uv,
        UB_matrix, Q_S_from_hkl, hkl_from_Q_S,
        goniometer_scan_RSL_y, B_matrix
 
+export Goniometer, R_SL
 
 end

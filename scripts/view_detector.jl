@@ -19,6 +19,7 @@ end
 # Geometry
 # -----------------------------------------------------------------------------
 pix = TOFtwin.pixels_from_coverage(L2=3.5, surface=:cylinder)
+#pix = pix_used
 
 pts = getfield.(pix, :r_L)
 xs  = getindex.(pts, 1)

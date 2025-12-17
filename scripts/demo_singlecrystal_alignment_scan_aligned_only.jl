@@ -6,7 +6,6 @@ using LinearAlgebra
 using Statistics
 using Base.Threads
 
-backend = lowercase(get(ENV, "TOFTWIN_BACKEND", "cairo"))
 backend = lowercase(get(ENV, "TOFTWIN_BACKEND", "gl"))
 if backend == "gl"
     using GLMakie
@@ -20,8 +19,8 @@ const TVec3 = TOFtwin.Vec3
 bank = bank_from_coverage(name="example", L2=3.5, surface=:cylinder)
 inst = Instrument(name="demo", L1=36.262, pixels=bank.pixels)
 
-# Use fewer pixels while iterating; switch to bank.pixels when you want
-pix_used = sample_pixels(bank, AngularDecimate(3, 2))
+# Speed while iterating (use bank.pixels for full coverage)
+pix_used = sample_pixels(bank, AngularDecimate(1, 1))
 # pix_used = bank.pixels
 
 Ei = 12.0
@@ -43,13 +42,10 @@ u_hkl = TVec3(0.5, 0.5, 0.1)
 v_hkl = TVec3(0.0, 1.0, -0.1)
 aln = alignment_from_uv(recip; u_hkl=u_hkl, v_hkl=v_hkl)
 
-# identity mapping: UB=B (no alignment)
-B = B_matrix(recip)
-aln_identity = SampleAlignment_from_UB(B)
-
 # ---------------- Goniometer scan ----------------
 angles_deg = 0:5:180
 angles = deg2rad.(collect(angles_deg))
+
 zero_offset_deg = 0.0
 R_SL_list = goniometer_scan_RSL_y(angles; zero_offset_rad=deg2rad(zero_offset_deg))
 
@@ -76,20 +72,12 @@ model_hkl = function(hkl::TVec3, ω::Float64)
     return amp * exp(-0.5*(dq/σQ)^2) * exp(-0.5*((ω - ω0)/σE)^2)
 end
 
-# ---------------- Predict (aligned vs identity) ----------------
+# ---------------- Predict ----------------
 @info "Scanning WITH u,v alignment..."
-pred_aln = predict_cut_mean_Hω_hkl_scan_aligned(inst;
+pred = predict_cut_mean_Hω_hkl_scan_aligned(inst;
     pixels=pix_used, Ei_meV=Ei, tof_edges_s=tof_edges,
     H_edges=H_edges, ω_edges=ω_edges,
     aln=aln, R_SL_list=R_SL_list, model_hkl=model_hkl,
-    K_center=Kc, K_halfwidth=Kh, L_center=Lc, L_halfwidth=Lh
-)
-
-@info "Scanning with IDENTITY mapping..."
-pred_id = predict_cut_mean_Hω_hkl_scan_aligned(inst;
-    pixels=pix_used, Ei_meV=Ei, tof_edges_s=tof_edges,
-    H_edges=H_edges, ω_edges=ω_edges,
-    aln=aln_identity, R_SL_list=R_SL_list, model_hkl=model_hkl,
     K_center=Kc, K_halfwidth=Kh, L_center=Lc, L_halfwidth=Lh
 )
 
@@ -104,27 +92,17 @@ scaled_for(pred_counts, model_grid) =
     maximum(pred_counts) / (maximum(model_grid) + 1e-12) .* model_grid
 
 # ---------------- Plot ----------------
-fig = Figure(size=(1200, 900))
+fig = Figure(size=(1100, 800))
 
 ax1 = Axis(fig[1,1], xlabel="H (r.l.u.)", ylabel="ω (meV)",
            title="Aligned (u,v) mean-per-bin   (zero_offset=$(zero_offset_deg)°)")
-heatmap!(ax1, H_cent, ω_cent, pred_aln.Hmean.counts)
-contour!(ax1, H_cent, ω_cent, scaled_for(pred_aln.Hmean.counts, model_Hω);
+heatmap!(ax1, H_cent, ω_cent, pred.Hmean.counts)
+contour!(ax1, H_cent, ω_cent, scaled_for(pred.Hmean.counts, model_Hω);
          color=:white, linewidth=1.0)
 
 ax2 = Axis(fig[1,2], xlabel="H (r.l.u.)", ylabel="ω (meV)",
-           title="Identity mapping (no alignment) mean-per-bin")
-heatmap!(ax2, H_cent, ω_cent, pred_id.Hmean.counts)
-contour!(ax2, H_cent, ω_cent, scaled_for(pred_id.Hmean.counts, model_Hω);
-         color=:white, linewidth=1.0)
-
-ax3 = Axis(fig[2,1], xlabel="H (r.l.u.)", ylabel="ω (meV)",
            title="Coverage weights (aligned)  log10(w+1)")
-heatmap!(ax3, H_cent, ω_cent, log10.(pred_aln.Hwt.counts .+ 1.0))
-
-ax4 = Axis(fig[2,2], xlabel="H (r.l.u.)", ylabel="ω (meV)",
-           title="Coverage weights (identity) log10(w+1)")
-heatmap!(ax4, H_cent, ω_cent, log10.(pred_id.Hwt.counts .+ 1.0))
+heatmap!(ax2, H_cent, ω_cent, log10.(pred.Hwt.counts .+ 1.0))
 
 mkpath("out")
 save("out/demo_singlecrystal_alignment_scan.png", fig)

@@ -341,3 +341,167 @@ function predict_cut_mean_Hω_hkl_scan(inst::Instrument;
     Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
     return (Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
 end
+
+using LinearAlgebra
+using Base.Threads
+
+"""
+Precompute pixel×TOF kinematics once for a given instrument and Ei.
+
+Returns:
+  QLx,QLy,QLz : Float64 matrices (np × n_tof) storing Q_L components (Å⁻¹)
+  ωL          : Float64 matrix  (np × n_tof) storing ω (meV)
+  jacdt       : Float64 matrix  (np × n_tof) storing |dω/dt| * dt
+  itmin,itmax : Int vectors (length np) with the valid TOF-bin range for each pixel
+"""
+function precompute_pixel_tof_kinematics(inst::Instrument,
+    pixels::AbstractVector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::AbstractVector{<:Real})
+
+    np = length(pixels)
+    n_tof = length(tof_edges_s) - 1
+
+    QLx = Matrix{Float64}(undef, np, n_tof)
+    QLy = Matrix{Float64}(undef, np, n_tof)
+    QLz = Matrix{Float64}(undef, np, n_tof)
+    ωL  = Matrix{Float64}(undef, np, n_tof)
+    jacdt = Matrix{Float64}(undef, np, n_tof)
+
+    itmin = fill(n_tof + 1, np)
+    itmax = fill(0, np)
+
+    @inbounds for ip in 1:np
+        p = pixels[ip]
+        L2p = L2(inst, p.id)
+
+        for it in 1:n_tof
+            t0 = Float64(tof_edges_s[it])
+            t1 = Float64(tof_edges_s[it+1])
+            t  = 0.5*(t0 + t1)
+            dt = (t1 - t0)
+
+            Ef = try
+                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
+            catch
+                continue
+            end
+            (Ef <= 0 || Ef > Ei_meV) && continue
+
+            Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+
+            QLx[ip,it] = Q[1]
+            QLy[ip,it] = Q[2]
+            QLz[ip,it] = Q[3]
+            ωL[ip,it]  = ω
+
+            jacdt[ip,it] = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+
+            itmin[ip] = min(itmin[ip], it)
+            itmax[ip] = max(itmax[ip], it)
+        end
+    end
+
+    return (QLx=QLx, QLy=QLy, QLz=QLz, ωL=ωL, jacdt=jacdt, itmin=itmin, itmax=itmax)
+end
+
+
+"""
+Alignment-aware single-crystal scan into a cut I(H,ω), using a kernel model_hkl(hkl, ω).
+
+- Uses SampleAlignment (UB / u,v) via hkl_from_Q_S(aln, Q_S)
+- Scans over orientations R_SL_list (each maps Q_L -> Q_S)
+- Deposits weighted mean per (H,ω) bin:
+    Hsum += model * (|dω/dt| dt)
+    Hwt  += (|dω/dt| dt)
+    Hmean = Hsum / (Hwt + eps)
+
+Returns (Hsum, Hwt, Hmean).
+"""
+function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
+    pixels::AbstractVector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::AbstractVector{<:Real},
+    H_edges::Vector{Float64},
+    ω_edges::Vector{Float64},
+    aln::SampleAlignment,
+    R_SL_list::AbstractVector,
+    model_hkl,
+    eps::Float64=1e-12,
+    K_center::Float64=0.0,
+    K_halfwidth::Float64=0.1,
+    L_center::Float64=0.0,
+    L_halfwidth::Float64=0.1,
+    threaded::Bool=true)
+
+    kin = precompute_pixel_tof_kinematics(inst, pixels, Ei_meV, tof_edges_s)
+
+    QLx, QLy, QLz = kin.QLx, kin.QLy, kin.QLz
+    ωL, jacdt = kin.ωL, kin.jacdt
+    itmin, itmax = kin.itmin, kin.itmax
+
+    np = length(pixels)
+    n_tof = length(tof_edges_s) - 1
+
+    # per-thread accumulators
+    Hsum_thr = [Hist2D(H_edges, ω_edges) for _ in 1:nthreads()]
+    Hwt_thr  = [Hist2D(H_edges, ω_edges) for _ in 1:nthreads()]
+
+    function do_one_orientation!(R_SL)
+        tid = threadid()
+        Hsum = Hsum_thr[tid]
+        Hwt  = Hwt_thr[tid]
+
+        @inbounds for ip in 1:np
+            hi = itmax[ip]
+            hi == 0 && continue
+            lo = itmin[ip]
+
+            for it in lo:hi
+                # Weight is the measure in ω-space induced by TOF binning
+                w = jacdt[ip,it]
+                w == 0.0 && continue
+
+                # Q_S = R_SL * Q_L (manual multiply to avoid extra temporaries)
+                qlx = QLx[ip,it]; qly = QLy[ip,it]; qlz = QLz[ip,it]
+                qsx = R_SL[1,1]*qlx + R_SL[1,2]*qly + R_SL[1,3]*qlz
+                qsy = R_SL[2,1]*qlx + R_SL[2,2]*qly + R_SL[2,3]*qlz
+                qsz = R_SL[3,1]*qlx + R_SL[3,2]*qly + R_SL[3,3]*qlz
+                Q_S = Vec3(qsx, qsy, qsz)
+
+                ω = ωL[ip,it]
+                hkl = hkl_from_Q_S(aln, Q_S)
+                Hh, Kk, Ll = hkl
+
+                (abs(Kk - K_center) > K_halfwidth) && continue
+                (abs(Ll - L_center) > L_halfwidth) && continue
+
+                deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
+                deposit_bilinear!(Hwt,  Hh, ω, w)
+            end
+        end
+    end
+
+    if threaded && nthreads() > 1
+        @threads for i in eachindex(R_SL_list)
+            do_one_orientation!(R_SL_list[i])
+        end
+    else
+        for R in R_SL_list
+            do_one_orientation!(R)
+        end
+    end
+
+    # reduce thread accumulators
+    Hsum = Hist2D(H_edges, ω_edges)
+    Hwt  = Hist2D(H_edges, ω_edges)
+    for k in 1:nthreads()
+        Hsum.counts .+= Hsum_thr[k].counts
+        Hwt.counts  .+= Hwt_thr[k].counts
+    end
+
+    Hmean = Hist2D(H_edges, ω_edges)
+    Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
+
+    return (Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
+end
