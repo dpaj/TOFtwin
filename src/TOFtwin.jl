@@ -66,4 +66,6 @@ export SampleAlignment, SampleAlignment_from_UB, alignment_from_uv,
 
 export Goniometer, R_SL
 
+export precompute_pixel_tof_kinematics, predict_cut_mean_Hω_hkl_scan_aligned
+
 end

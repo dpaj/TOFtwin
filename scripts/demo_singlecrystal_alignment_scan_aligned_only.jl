@@ -31,19 +31,27 @@ tof_edges = collect(range(tmin, tmax; length=600+1))
 
 @info "pixels used = $(length(pix_used))"
 @info "TOF window (ms) = $(1e3*tmin) .. $(1e3*tmax)"
-@info "Threads = $(nthreads())"
+@info "Threads = $(nthreads())   (set JULIA_NUM_THREADS for more)"
+
+# If your DetectorPixel includes solid angle ΔΩ (sr), this is a good sanity check:
+try
+    dΩ = [p.ΔΩ for p in pix_used]
+    @info "ΔΩ (sr) range = ($(minimum(dΩ)), $(maximum(dΩ)))  mean=$(mean(dΩ))"
+catch err
+    @warn "Could not read p.ΔΩ (solid angle). Did you update detectors_coverage.jl?" err
+end
 
 # ---------------- Lattice / reciprocal ----------------
 lp = LatticeParams(8.5031, 8.5031, 8.5031, 90.0, 90.0, 90.0)
 recip = reciprocal_lattice(lp)
 
 # ---------------- Sample alignment (u,v) ----------------
-u_hkl = TVec3(0.5, 0.5, 0.1)
-v_hkl = TVec3(0.0, 1.0, -0.1)
+u_hkl = TVec3(1.0, 0.0, 0.0)
+v_hkl = TVec3(0.0, 1.0, 0.0)
 aln = alignment_from_uv(recip; u_hkl=u_hkl, v_hkl=v_hkl)
 
 # ---------------- Goniometer scan ----------------
-angles_deg = 0:5:180
+angles_deg = -180:0.5:180
 angles = deg2rad.(collect(angles_deg))
 
 zero_offset_deg = 0.0
@@ -59,34 +67,38 @@ Kc, Kh = 0.0, 0.10
 Lc, Lh = 0.0, 0.10
 
 # ---------------- HKL kernel ----------------
-q0  = TVec3(1.0, 0.0, 0.0)
-Δ   = 2.0
-v   = 3.0
-σE  = 0.25
-σQ  = 0.25
-amp = 1.0
+# Periodic cosine dispersion in HKL (r.l.u.) with optional Gaussian envelope around q0.
+toy = ToyCosineHKL(
+    q0 = TVec3(1.0, 0.0, 0.0),   # center of envelope in HKL (r.l.u.)
+    Δ  = 2.0,
+    Jh = 3.0,
+    Jk = 1.5,
+    Jl = 0.8,
+    σE = 0.25,
+    σQ = 0.25,                  # set to Inf to make intensity uniform in HKL
+    amp = 1.0
+)
 
-model_hkl = function(hkl::TVec3, ω::Float64)
-    dq = norm(hkl - q0)
-    ω0 = Δ + v*dq
-    return amp * exp(-0.5*(dq/σQ)^2) * exp(-0.5*((ω - ω0)/σE)^2)
-end
+model_hkl = (hkl::TVec3, ω::Float64) -> toy(hkl, ω)
 
-# ---------------- Predict ----------------
-@info "Scanning WITH u,v alignment..."
-pred = predict_cut_mean_Hω_hkl_scan_aligned(inst;
+# ---------------- Predict (aligned, weighted mean) ----------------
+@info "Scanning WITH u,v alignment (weighted by |dω/dt| dt ΔΩ)..."
+pred = TOFtwin.predict_cut_mean_Hω_hkl_scan_aligned(inst;
     pixels=pix_used, Ei_meV=Ei, tof_edges_s=tof_edges,
     H_edges=H_edges, ω_edges=ω_edges,
     aln=aln, R_SL_list=R_SL_list, model_hkl=model_hkl,
-    K_center=Kc, K_halfwidth=Kh, L_center=Lc, L_halfwidth=Lh
+    K_center=Kc, K_halfwidth=Kh, L_center=Lc, L_halfwidth=Lh,
+    threaded=true
 )
 
 # ---------------- Optional: overlay kernel contours (K/L-averaged) ----------------
 nK, nL = 9, 9
 Kgrid = collect(range(Kc - Kh, Kc + Kh; length=nK))
 Lgrid = collect(range(Lc - Lh, Lc + Lh; length=nL))
-model_Hω = [mean(model_hkl(TVec3(H,k,l), ω) for k in Kgrid, l in Lgrid)
+
+model_Hω = [mean(toy(TVec3(H,k,l), ω) for k in Kgrid, l in Lgrid)
             for H in H_cent, ω in ω_cent]
+
 
 scaled_for(pred_counts, model_grid) =
     maximum(pred_counts) / (maximum(model_grid) + 1e-12) .* model_grid
@@ -95,7 +107,7 @@ scaled_for(pred_counts, model_grid) =
 fig = Figure(size=(1100, 800))
 
 ax1 = Axis(fig[1,1], xlabel="H (r.l.u.)", ylabel="ω (meV)",
-           title="Aligned (u,v) mean-per-bin   (zero_offset=$(zero_offset_deg)°)")
+           title="Aligned (u,v) weighted mean   (zero_offset=$(zero_offset_deg)°)")
 heatmap!(ax1, H_cent, ω_cent, pred.Hmean.counts)
 contour!(ax1, H_cent, ω_cent, scaled_for(pred.Hmean.counts, model_Hω);
          color=:white, linewidth=1.0)
@@ -105,5 +117,5 @@ ax2 = Axis(fig[1,2], xlabel="H (r.l.u.)", ylabel="ω (meV)",
 heatmap!(ax2, H_cent, ω_cent, log10.(pred.Hwt.counts .+ 1.0))
 
 mkpath("out")
-save("out/demo_singlecrystal_alignment_scan.png", fig)
+save("out/demo_singlecrystal_alignment_scan_aligned_only.png", fig)
 display(fig)

@@ -4,7 +4,8 @@ using LinearAlgebra
 Predict a powder-style histogram in (|Q|, ω) by sweeping pixels and TOF bins.
 
 - model(Qmag, ω) returns relative intensity (arbitrary units)
-- ignores resolution, efficiency, solid-angle corrections, Jacobians (for now)
+- includes Jacobian dω/dt and pixel solid angle ΔΩ
+- still ignores resolution, efficiency, multiple scattering, etc.
 
 You can pass either:
 - pixels = bank.pixels (all), OR
@@ -39,8 +40,9 @@ function predict_hist_Qω_powder(inst::Instrument;
             Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
             Qmag = norm(Q)
 
-            # Convert dt -> dω via Jacobian and weight the deposit
-            w = model(Qmag, ω) * abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+            # expected counts per TOF bin ~ S(Q,ω) * dω * ΔΩ = S * |dω/dt| dt * ΔΩ
+            jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+            w = model(Qmag, ω) * jacdt * p.ΔΩ
 
             deposit_bilinear!(H, Qmag, ω, w)
         end
@@ -78,8 +80,9 @@ function predict_pixel_tof(inst::Instrument;
             Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
             Qmag = norm(Q)
 
-            # expected counts per TOF bin ~ S(Q,ω) * dω = S * |dω/dt| dt
-            C[p.id, it] += model(Qmag, ω) * abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+            # expected counts per TOF bin ~ S(Q,ω) * dω * ΔΩ = S * |dω/dt| dt * ΔΩ
+            jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+            C[p.id, it] += model(Qmag, ω) * jacdt * p.ΔΩ
         end
     end
     return C
@@ -133,10 +136,8 @@ Conventional powder workflow:
 model(Qmag, ω)  -> detector×TOF -> vanadium normalize -> reduce to (|Q|,ω)
 and return the *mean per (Q,ω) bin* plus the per-bin weights (coverage).
 
-Returns a NamedTuple:
+Returns:
   (Hraw, Hsum, Hwt, Hmean)
-
-where each is a Hist2D (same edges).
 """
 function predict_powder_mean_Qω(inst::Instrument;
     pixels::Vector{DetectorPixel},
@@ -166,7 +167,7 @@ function predict_powder_mean_Qω(inst::Instrument;
         C=Cnorm, Q_edges=Q_edges, ω_edges=ω_edges
     )
 
-    # per-bin weights/coverage (number of contributing detector×TOF samples)
+    # per-bin weights/coverage (count of contributing detector×TOF samples)
     W = zeros(size(Cnorm))
     W[Cv .> 0.0] .= 1.0
 
@@ -175,9 +176,8 @@ function predict_powder_mean_Qω(inst::Instrument;
         C=W, Q_edges=Q_edges, ω_edges=ω_edges
     )
 
-    reopening = Hist2D(Q_edges, ω_edges)  # helper to make Hmean with same edges
-    reopening.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
-    Hmean = reopening
+    Hmean = Hist2D(Q_edges, ω_edges)
+    Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ eps)
 
     return (Hraw=Hraw, Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
 end
