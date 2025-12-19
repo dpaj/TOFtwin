@@ -1,20 +1,5 @@
 using Random
 
-"Container for a named set of pixels + metadata."
-struct DetectorBank
-    name::String
-    pixels::Vector{DetectorPixel}
-    meta::NamedTuple
-end
-
-"Convenience constructor that records the coverage keywords as metadata."
-function bank_from_coverage(; name::String="coverage", kwargs...)
-    pix = pixels_from_coverage(; kwargs...)
-    return DetectorBank(name, pix, (; kwargs...))
-end
-
-# ------------------------- Sampling API -------------------------
-
 abstract type PixelSampler end
 
 struct AllPixels <: PixelSampler end
@@ -23,96 +8,95 @@ struct RandomSubset <: PixelSampler
     n::Int
     seed::Int
 end
-RandomSubset(n::Int; seed::Int=0) = RandomSubset(n, seed)
 
 struct Stride <: PixelSampler
     step::Int
-    offset::Int
 end
-Stride(step::Int; offset::Int=1) = Stride(step, offset)
 
-"Pick up to n_per_eta pixels from each η-bin (optionally separately per bank)."
+"""
+Keep pixels on a coarse angular grid by subsampling the (iψ,iη) indices.
+Example: AngularDecimate(3,2) keeps every 3rd ψ-bin and every 2nd η-bin.
+"""
+struct AngularDecimate <: PixelSampler
+    stepψ::Int
+    stepη::Int
+end
+
+"""
+Pick up to `n_per_eta` pixels uniformly across ψ for each η-row (and each bank).
+This is useful when you want to preserve vertical coverage while thinning ψ.
+"""
 struct StratifiedByEta <: PixelSampler
     n_per_eta::Int
     seed::Int
-    separate_banks::Bool
 end
-StratifiedByEta(n_per_eta::Int; seed::Int=0, separate_banks::Bool=true) =
-    StratifiedByEta(n_per_eta, seed, separate_banks)
 
-"Deterministic decimation in the (iψ,iη) grid."
-struct AngularDecimate <: PixelSampler
-    dψ::Int
-    dη::Int
-    startψ::Int
-    startη::Int
-    separate_banks::Bool
-end
-AngularDecimate(dψ::Int, dη::Int; startψ::Int=1, startη::Int=1, separate_banks::Bool=true) =
-    AngularDecimate(dψ, dη, startψ, startη, separate_banks)
-
-"Filter to one bank, then apply an inner sampler."
+"""
+Optional helper: select only one bank (:left or :right).
+"""
 struct ByBank <: PixelSampler
-    bank::Symbol
-    inner::PixelSampler
+    which::Symbol
 end
-ByBank(bank::Symbol; inner::PixelSampler=AllPixels()) = ByBank(bank, inner)
 
-# ------------------------- Implementations -------------------------
+# --- dispatch entry points ---
 
 sample_pixels(bank::DetectorBank, sampler::PixelSampler) = sample_pixels(bank.pixels, sampler)
 
-sample_pixels(pix::Vector{DetectorPixel}, ::AllPixels) = pix
+sample_pixels(pix::AbstractVector{DetectorPixel}, ::AllPixels) = collect(pix)
 
-function sample_pixels(pix::Vector{DetectorPixel}, s::RandomSubset)
-    n = length(pix)
-    s.n >= n && return pix
+function sample_pixels(pix::AbstractVector{DetectorPixel}, s::RandomSubset)
     rng = MersenneTwister(s.seed)
-    idx = randperm(rng, n)[1:s.n]
-    sort!(idx)                 # keep stable-ish ordering by original id
-    return pix[idx]
+    n = min(s.n, length(pix))
+    return rand(rng, collect(pix), n)
 end
 
-function sample_pixels(pix::Vector{DetectorPixel}, s::Stride)
-    return pix[s.offset:s.step:end]
+function sample_pixels(pix::AbstractVector{DetectorPixel}, s::Stride)
+    step = max(s.step, 1)
+    return collect(pix)[1:step:end]
 end
 
-function sample_pixels(pix::Vector{DetectorPixel}, s::ByBank)
-    sub = [p for p in pix if p.bank == s.bank]
-    return sample_pixels(sub, s.inner)
+function sample_pixels(pix::AbstractVector{DetectorPixel}, s::AngularDecimate)
+    a = max(s.stepψ, 1)
+    b = max(s.stepη, 1)
+    out = DetectorPixel[]
+    sizehint!(out, length(pix) ÷ (a*b))
+    for p in pix
+        if ((p.iψ - 1) % a == 0) && ((p.iη - 1) % b == 0)
+            push!(out, p)
+        end
+    end
+    return out
 end
 
-function sample_pixels(pix::Vector{DetectorPixel}, s::StratifiedByEta)
+function sample_pixels(pix::AbstractVector{DetectorPixel}, s::ByBank)
+    return [p for p in pix if p.bank == s.which]
+end
+
+function sample_pixels(pix::AbstractVector{DetectorPixel}, s::StratifiedByEta)
     rng = MersenneTwister(s.seed)
-    groups = Dict{Any, Vector{Int}}()
 
-    for (i, p) in pairs(pix)
-        key = s.separate_banks ? (p.bank, p.iη) : p.iη
-        push!(get!(groups, key, Int[]), i)
+    # group by (bank, iη)
+    groups = Dict{Tuple{Symbol,Int}, Vector{DetectorPixel}}()
+    for p in pix
+        key = (p.bank, p.iη)
+        push!(get!(groups, key, DetectorPixel[]), p)
     end
 
-    chosen = Int[]
-    for idxs in values(groups)
-        if length(idxs) <= s.n_per_eta
-            append!(chosen, idxs)
+    out = DetectorPixel[]
+    for (key, row) in groups
+        # sort by ψ so selection is stable-ish
+        sort!(row, by = p -> p.ψ)
+        n = min(s.n_per_eta, length(row))
+        if n == length(row)
+            append!(out, row)
         else
-            pick = randperm(rng, length(idxs))[1:s.n_per_eta]
-            append!(chosen, idxs[pick])
+            # pick n indices spaced across the row (plus a tiny shuffle)
+            idxs = round.(Int, range(1, length(row), length=n))
+            # optional jitter to avoid always choosing same pixels
+            idxs = [clamp(i + rand(rng, (-1):1), 1, length(row)) for i in idxs]
+            append!(out, row[idxs])
         end
     end
 
-    sort!(chosen)
-    return pix[chosen]
-end
-
-function sample_pixels(pix::Vector{DetectorPixel}, s::AngularDecimate)
-    chosen = Int[]
-    for (i, p) in pairs(pix)
-        okψ = (p.iψ - s.startψ) % s.dψ == 0
-        okη = (p.iη - s.startη) % s.dη == 0
-        if okψ && okη
-            push!(chosen, i)
-        end
-    end
-    return pix[chosen]
+    return out
 end

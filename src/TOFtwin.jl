@@ -25,6 +25,12 @@ include("single_crystal.jl")
 
 include("goniometer.jl")
 
+include("view_detector.jl")
+
+include("mantid_idf.jl")
+using .MantidIDF: load_mantid_idf
+export load_mantid_idf
+
 export Vec3, DetectorPixel, pixels_from_coverage, summarize_pixels
 export DetectorBank, bank_from_coverage
 export PixelSampler, AllPixels, RandomSubset, Stride, StratifiedByEta, AngularDecimate, ByBank
@@ -67,5 +73,9 @@ export SampleAlignment, SampleAlignment_from_UB, alignment_from_uv,
 export Goniometer, R_SL
 
 export precompute_pixel_tof_kinematics, predict_cut_mean_Hω_hkl_scan_aligned
+
+export load_mantid_idf
+
+export detector_cloud, filter_pixels, decimate_pixels_angular
 
 end

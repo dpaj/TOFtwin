@@ -1,16 +1,20 @@
 using LinearAlgebra
 using Base.Threads
 
+
+# ----------------------------
+# Utility: safe solid angle factor
+# (assumes DetectorPixel has ΔΩ; if you ever revert, set ΔΩ=1 in pixels)
+# ----------------------------
+@inline pixel_Ω(p::DetectorPixel) = p.ΔΩ
+
 """
 Reduce detector×TOF matrix into a single-crystal cut I(H, ω) by:
 - mapping pixel×TOF -> (Q_L, ω)
-- rotating Q_L -> Q_S (sample frame) using pose
-- converting Q_S -> (H,K,L) using recip
+- rotating Q_L -> Q_S (sample frame)
+- converting Q_S -> (H,K,L)
 - selecting a window in K and L
 - depositing into (H, ω) histogram
-
-NOTE: This reducer does *not* apply any Jacobian or solid-angle factors itself.
-It assumes those are already baked into the detector×TOF matrix `C`.
 """
 function reduce_pixel_tof_to_Hω_cut(inst::Instrument;
     pixels::Vector{DetectorPixel},
@@ -29,7 +33,6 @@ function reduce_pixel_tof_to_Hω_cut(inst::Instrument;
     H = Hist2D(H_edges, ω_edges)
     n_tof = length(tof_edges_s) - 1
 
-    # lab -> sample rotation (vectors: rotation only)
     R_SL = T_SL(pose).R
 
     for p in pixels
@@ -38,7 +41,9 @@ function reduce_pixel_tof_to_Hω_cut(inst::Instrument;
             w = C[p.id, it]
             w == 0.0 && continue
 
-            t = 0.5*(tof_edges_s[it] + tof_edges_s[it+1])
+            t0 = tof_edges_s[it]
+            t1 = tof_edges_s[it+1]
+            t  = 0.5*(t0 + t1)
 
             Ef = try
                 Ef_from_tof(inst.L1, L2p, Ei_meV, t)
@@ -65,11 +70,11 @@ end
 
 
 """
-Full conventional single-crystal cut workflow:
-model(Q_S, ω) -> detector×TOF (with |dω/dt|dt ΔΩ) -> vanadium normalize -> cut to (H,ω)
+Full conventional single-crystal cut workflow (pose-based):
+model(Q_S, ω) -> detector×TOF -> vanadium normalize -> cut to (H,ω)
 Return (Hraw, Hsum, Hwt, Hmean).
 
-Here ΔΩ cancels in Cs/Cv, but we include it so raw counts look instrument-like.
+Weights include: |dω/dt| dt ΔΩ
 """
 function predict_cut_mean_Hω(inst::Instrument;
     pixels::Vector{DetectorPixel},
@@ -94,6 +99,7 @@ function predict_cut_mean_Hω(inst::Instrument;
     R_SL = T_SL(pose).R
 
     for p in pixels
+        Ω = pixel_Ω(p)
         L2p = L2(inst, p.id)
         for it in 1:n_tof
             t0 = tof_edges_s[it]
@@ -111,8 +117,7 @@ function predict_cut_mean_Hω(inst::Instrument;
             Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
             Q_S = R_SL * Q_L
 
-            # expected counts per TOF bin ~ S * dω * ΔΩ = S * |dω/dt| dt * ΔΩ
-            jac = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt * p.ΔΩ
+            jac = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt * Ω
             Cs[p.id, it] += model(Q_S, ω) * jac
             Cv[p.id, it] += 1.0 * jac
         end
@@ -136,7 +141,6 @@ function predict_cut_mean_Hω(inst::Instrument;
         L_center=L_center, L_halfwidth=L_halfwidth
     )
 
-    # weights/coverage: 1 where Cv>0
     W = zeros(size(Cnorm))
     W[Cv .> 0.0] .= 1.0
     Hwt = reduce_pixel_tof_to_Hω_cut(inst;
@@ -363,6 +367,10 @@ function predict_cut_mean_Hω_hkl_scan(inst::Instrument;
 end
 
 
+# ----------------------------
+# FAST precompute + alignment-aware scan
+# ----------------------------
+
 """
 Precompute pixel×TOF kinematics once for a given instrument and Ei.
 
@@ -391,6 +399,7 @@ function precompute_pixel_tof_kinematics(inst::Instrument,
 
     @inbounds for ip in 1:np
         p = pixels[ip]
+        Ω = pixel_Ω(p)
         L2p = L2(inst, p.id)
 
         for it in 1:n_tof
@@ -413,7 +422,7 @@ function precompute_pixel_tof_kinematics(inst::Instrument,
             QLz[ip,it] = Q[3]
             ωL[ip,it]  = ω
 
-            jacdt[ip,it] = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt * p.ΔΩ
+            jacdt[ip,it] = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt * Ω
 
             itmin[ip] = min(itmin[ip], it)
             itmax[ip] = max(itmax[ip], it)
@@ -429,10 +438,9 @@ Alignment-aware single-crystal scan into a cut I(H,ω), using a kernel model_hkl
 
 - Uses SampleAlignment (UB / u,v) via hkl_from_Q_S(aln, Q_S)
 - Scans over orientations R_SL_list (each maps Q_L -> Q_S)
-- Deposits weighted mean per (H,ω) bin using:
-    w = (|dω/dt| dt ΔΩ)
-    Hsum += model * w
-    Hwt  += w
+- Deposits weighted mean per (H,ω) bin:
+    Hsum += model * (|dω/dt| dt ΔΩ)
+    Hwt  += (|dω/dt| dt ΔΩ)
     Hmean = Hsum / (Hwt + eps)
 
 Returns (Hsum, Hwt, Hmean).
@@ -478,6 +486,7 @@ function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
                 w = jacdt[ip,it]
                 w == 0.0 && continue
 
+                # Q_S = R_SL * Q_L (manual multiply to avoid temporaries)
                 qlx = QLx[ip,it]; qly = QLy[ip,it]; qlz = QLz[ip,it]
                 qsx = R_SL[1,1]*qlx + R_SL[1,2]*qly + R_SL[1,3]*qlz
                 qsy = R_SL[2,1]*qlx + R_SL[2,2]*qly + R_SL[2,3]*qlz

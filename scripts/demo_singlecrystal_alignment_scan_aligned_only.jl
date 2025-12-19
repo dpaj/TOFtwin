@@ -19,8 +19,7 @@ const TVec3 = TOFtwin.Vec3
 bank = bank_from_coverage(name="example", L2=3.5, surface=:cylinder)
 inst = Instrument(name="demo", L1=36.262, pixels=bank.pixels)
 
-# Speed while iterating (use bank.pixels for full coverage)
-pix_used = sample_pixels(bank, AngularDecimate(1, 1))
+pix_used = sample_pixels(bank, AngularDecimate(3, 2))
 # pix_used = bank.pixels
 
 Ei = 12.0
@@ -33,7 +32,6 @@ tof_edges = collect(range(tmin, tmax; length=600+1))
 @info "TOF window (ms) = $(1e3*tmin) .. $(1e3*tmax)"
 @info "Threads = $(nthreads())   (set JULIA_NUM_THREADS for more)"
 
-# If your DetectorPixel includes solid angle ΔΩ (sr), this is a good sanity check:
 try
     dΩ = [p.ΔΩ for p in pix_used]
     @info "ΔΩ (sr) range = ($(minimum(dΩ)), $(maximum(dΩ)))  mean=$(mean(dΩ))"
@@ -46,8 +44,8 @@ lp = LatticeParams(8.5031, 8.5031, 8.5031, 90.0, 90.0, 90.0)
 recip = reciprocal_lattice(lp)
 
 # ---------------- Sample alignment (u,v) ----------------
-u_hkl = TVec3(1.0, 0.0, 0.0)
-v_hkl = TVec3(0.0, 1.0, 0.0)
+u_hkl = TVec3(0.5, 0.5, 0.1)
+v_hkl = TVec3(0.0, 1.0, -0.1)
 aln = alignment_from_uv(recip; u_hkl=u_hkl, v_hkl=v_hkl)
 
 # ---------------- Goniometer scan ----------------
@@ -66,19 +64,15 @@ H_cent = 0.5 .* (H_edges[1:end-1] .+ H_edges[2:end])
 Kc, Kh = 0.0, 0.10
 Lc, Lh = 0.0, 0.10
 
-# ---------------- HKL kernel ----------------
-# Periodic cosine dispersion in HKL (r.l.u.) with optional Gaussian envelope around q0.
-toy = ToyCosineHKL(
-    q0 = TVec3(1.0, 0.0, 0.0),   # center of envelope in HKL (r.l.u.)
-    Δ  = 2.0,
-    Jh = 3.0,
-    Jk = 1.5,
-    Jl = 0.8,
-    σE = 0.25,
-    σQ = 0.25,                  # set to Inf to make intensity uniform in HKL
-    amp = 1.0
+# ---------------- HKL kernel: ToyCosineHKL ----------------
+toy = ToyCosineHKL(;
+    q0=TVec3(0.0, 0.0, 0.0),
+    Δ=2.0,
+    Jh=3.0, Jk=1.5, Jl=0.8,
+    σE=0.25,
+    σQ=0.90,
+    amp=1.0
 )
-
 model_hkl = (hkl::TVec3, ω::Float64) -> toy(hkl, ω)
 
 # ---------------- Predict (aligned, weighted mean) ----------------
@@ -95,10 +89,8 @@ pred = TOFtwin.predict_cut_mean_Hω_hkl_scan_aligned(inst;
 nK, nL = 9, 9
 Kgrid = collect(range(Kc - Kh, Kc + Kh; length=nK))
 Lgrid = collect(range(Lc - Lh, Lc + Lh; length=nL))
-
-model_Hω = [mean(toy(TVec3(H,k,l), ω) for k in Kgrid, l in Lgrid)
+model_Hω = [mean(model_hkl(TVec3(H,k,l), ω) for k in Kgrid, l in Lgrid)
             for H in H_cent, ω in ω_cent]
-
 
 scaled_for(pred_counts, model_grid) =
     maximum(pred_counts) / (maximum(model_grid) + 1e-12) .* model_grid
