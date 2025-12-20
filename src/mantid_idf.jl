@@ -49,38 +49,100 @@ end
 _parsef(s::AbstractString, default::Float64=0.0) = isempty(s) ? default : parse(Float64, s)
 _parsei(s::AbstractString, default::Int=0)       = isempty(s) ? default : parse(Int, s)
 
+# Axis-angle helper for Mantid-style attributes
+function _axis_angle_from(node::EzXML.Node; deg_key::AbstractString)
+    deg = _parsef(_getattr(node, deg_key, "0"), 0.0)
+    ax  = SVector{3,Float64}(
+        _parsef(_getattr(node, "axis-x", "0"), 0.0),
+        _parsef(_getattr(node, "axis-y", "0"), 0.0),
+        _parsef(_getattr(node, "axis-z", "1"), 1.0),
+    )
+    return deg, ax
+end
+
+# Mantid can nest <rot> nodes to build composite rotations. The docs state:
+# outermost applied first, then the next, etc. For column vectors (v' = R*v),
+# that means left-multiplying as we walk forward in that application order.
+function _R_from_rot_node(rot::EzXML.Node)
+    deg, ax = _axis_angle_from(rot; deg_key="val")
+    R = _rot_axis_angle(ax, deg)
+
+    kids = EzXML.findall("./*[local-name()='rot']", rot)
+    for k in kids
+        Rk = _R_from_rot_node(k)
+        R = Rk * R
+    end
+    return R
+end
+
 # Mantid IDF uses axis-angle rotations (val in degrees)
 function _rot_axis_angle(axis::SVector{3,Float64}, deg::Float64)
     θ = deg * (pi/180)
     ax = axis / max(norm(axis), 1e-15)
     x,y,z = ax
     c = cos(θ); s = sin(θ); C = 1 - c
+
+    # NOTE: StaticArrays' SMatrix constructor consumes entries in *column-major* order.
+    # So we must pass (a11,a21,a31,a12,a22,a32,a13,a23,a33).
+    a11 = c + x*x*C
+    a12 = x*y*C - z*s
+    a13 = x*z*C + y*s
+
+    a21 = y*x*C + z*s
+    a22 = c + y*y*C
+    a23 = y*z*C - x*s
+
+    a31 = z*x*C - y*s
+    a32 = z*y*C + x*s
+    a33 = c + z*z*C
+
     return SMatrix{3,3,Float64,9}(
-        c + x*x*C,   x*y*C - z*s, x*z*C + y*s,
-        y*x*C + z*s, c + y*y*C,   y*z*C - x*s,
-        z*x*C - y*s, z*y*C + x*s, c + z*z*C
+        a11, a21, a31,
+        a12, a22, a32,
+        a13, a23, a33
     )
 end
 
 _xyz_from_location(loc::EzXML.Node) = begin
-    x = _parsef(_getattr(loc, "x", "0"))
-    y = _parsef(_getattr(loc, "y", "0"))
-    z = _parsef(_getattr(loc, "z", "0"))
-    SVector{3,Float64}(x,y,z)
+    # Prefer Cartesian if any of x/y/z are present
+    xs = _getattr(loc, "x", "")
+    ys = _getattr(loc, "y", "")
+    zs = _getattr(loc, "z", "")
+    if !(isempty(xs) && isempty(ys) && isempty(zs))
+        x = _parsef(xs, 0.0)
+        y = _parsef(ys, 0.0)
+        z = _parsef(zs, 0.0)
+        return SVector{3,Float64}(x,y,z)
+    end
+
+    # Mantid also supports spherical coordinates: r, t (theta, from +z), p (phi, in x-y)
+    r = _parsef(_getattr(loc, "r", "0"), 0.0)
+    t = _parsef(_getattr(loc, "t", "0"), 0.0) * (pi/180)
+    p = _parsef(_getattr(loc, "p", "0"), 0.0) * (pi/180)
+
+    x = r * sin(t) * cos(p)
+    y = r * sin(t) * sin(p)
+    z = r * cos(t)
+    return SVector{3,Float64}(x,y,z)
 end
 
 function _R_from_location(loc::EzXML.Node)
     R = I3
+
+    # a) rotation given directly on <location rot="..." axis-x="..." ...>
+    deg0, ax0 = _axis_angle_from(loc; deg_key="rot")
+    if deg0 != 0.0
+        R0 = _rot_axis_angle(ax0, deg0)
+        R = R0 * R
+    end
+
+    # b) rotations as child <rot> elements (possibly nested)
     rots = EzXML.findall("./*[local-name()='rot']", loc)
     for r in rots
-        val = _parsef(_getattr(r, "val", "0"))
-        ax  = SVector{3,Float64}(
-            _parsef(_getattr(r, "axis-x", "0")),
-            _parsef(_getattr(r, "axis-y", "0")),
-            _parsef(_getattr(r, "axis-z", "1"))
-        )
-        R = R * _rot_axis_angle(ax, val)
+        Rr = _R_from_rot_node(r)
+        R = Rr * R
     end
+
     return R
 end
 
