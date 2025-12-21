@@ -18,7 +18,7 @@ const TVec3 = TOFtwin.Vec3
 idf_path = joinpath(@__DIR__, "CNCS_Definition_2025B.xml")
 
 # --- Load CNCS geometry from IDF ---
-geo = TOFtwin.load_mantid_idf(idf_path; ψbins=720, ηbins=256)
+geo = TOFtwin.MantidIDF.load_mantid_idf_diskcached(idf_path; ψbins=720, ηbins=256)
 inst = geo.inst
 pixels_all = geo.pixels
 @info "CNCS loaded" geo.meta

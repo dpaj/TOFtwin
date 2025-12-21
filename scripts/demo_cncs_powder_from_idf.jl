@@ -14,7 +14,7 @@ end
 
 # ---------------- IDF -> Instrument ----------------
 idf_path = joinpath(@__DIR__, "CNCS_Definition_2025B.xml")
-out = TOFtwin.load_mantid_idf(idf_path)
+out = TOFtwin.MantidIDF.load_mantid_idf_diskcached(idf_path)
 @info "IDF loaded" out.meta
 
 inst = out.inst
@@ -27,7 +27,7 @@ else
 end
 
 # Decimate heavily at first (CNCS is ~51k pixels)
-ψstride, ηstride = 10, 6
+ψstride, ηstride = 1, 1
 pix_used = TOFtwin.sample_pixels(bank, TOFtwin.AngularDecimate(ψstride, ηstride))
 @info "pixels used = $(length(pix_used)) (of $(length(bank.pixels)))  stride=(ψ=$ψstride, η=$ηstride)"
 @info "Threads = $(nthreads())"

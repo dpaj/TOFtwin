@@ -3,9 +3,189 @@ module MantidIDF
 using EzXML
 using LinearAlgebra
 using StaticArrays: SVector, SMatrix
+using Serialization
+using SHA
 
 # Bring parent module into scope (this is the RIGHT way for a submodule)
 import ..TOFtwin
+
+# -------------------------
+# Session cache (keeps the IDF-loaded instrument in memory across repeated demos)
+# -------------------------
+
+const _IDF_MEMCACHE = Dict{Any,Any}()
+
+# Normalize r_samp_override for use in cache keys (avoid huge SVector keys / type instability)
+_norm_r_override(x) = x === nothing ? nothing : (Float64(x[1]), Float64(x[2]), Float64(x[3]))
+
+# -------------------------
+# Disk cache (persists across Julia sessions)
+# -------------------------
+
+const _IDF_DISKCACHE_VERSION = 1
+
+"""A small fingerprint so we can invalidate disk caches when the IDF changes."""
+function _idf_disk_fingerprint(idf_src::AbstractString)
+    s = strip(idf_src)
+    if startswith(s, "<") || startswith(s, "<?xml")
+        # NOTE: Base.hash is salted per Julia session; use a stable digest
+        # so disk caches can be reused across runs.
+        return (kind=:xml, sha1=bytes2hex(sha1(codeunits(s))))
+    end
+
+    p = abspath(String(idf_src))
+    st = stat(p)
+    # mtime is a Float64 in seconds; include file size too.
+    return (kind=:file, path=p, mtime=st.mtime, size=st.size)
+end
+
+function _default_disk_cache_dir(idf_src::AbstractString)
+    s = strip(idf_src)
+    if startswith(s, "<") || startswith(s, "<?xml")
+        return joinpath(pwd(), ".toftwin_cache")
+    else
+        return joinpath(dirname(abspath(String(idf_src))), ".toftwin_cache")
+    end
+end
+
+function _disk_cache_path(idf_src::AbstractString, key; cache_dir::Union{Nothing,AbstractString}=nothing)
+    dir = cache_dir === nothing ? _default_disk_cache_dir(idf_src) : String(cache_dir)
+    mkpath(dir)
+
+    base = strip(idf_src)
+    stem = (startswith(base, "<") || startswith(base, "<?xml")) ? "idf" : basename(String(idf_src))
+    # NOTE: Base.hash is salted per Julia session, so do NOT use it for a
+    # persistent filename. Use a stable digest instead.
+    id = bytes2hex(sha1(codeunits(repr(key))))
+    return joinpath(dir, "$(stem)_$(id).tofgeom.jls")
+end
+
+"""Remove all TOFtwin IDF disk-cache files in `cache_dir` (defaults to the IDF's directory)."""
+function clear_mantid_idf_disk_cache!(idf_src::AbstractString; cache_dir::Union{Nothing,AbstractString}=nothing)
+    dir = cache_dir === nothing ? _default_disk_cache_dir(idf_src) : String(cache_dir)
+    isdir(dir) || return nothing
+    for f in readdir(dir; join=true)
+        endswith(f, ".tofgeom.jls") && rm(f; force=true)
+    end
+    return nothing
+end
+
+"""
+    load_mantid_idf_diskcached(idf_src; kwargs...)
+
+Load a processed, TOFtwin-native instrument geometry from a disk cache if available.
+If not present (or invalid), it will parse the Mantid IDF, build the geometry, then
+write a cache file for subsequent runs.
+
+This is the recommended entrypoint for demo scripts that are launched as a fresh
+Julia process each time.
+"""
+function load_mantid_idf_diskcached(idf_src::AbstractString;
+    instrument_name::AbstractString = "CNCS",
+    component_type::AbstractString  = "detectors",
+    bank_prefix::AbstractString     = "bank",
+    ψbins::Int = 720,
+    ηbins::Int = 256,
+    r_samp_override = nothing,
+    center_on_sample::Bool = true,
+    cache_dir::Union{Nothing,AbstractString} = nothing,
+    rebuild::Bool = false)
+
+    # Key must include anything that changes the returned `geo` object.
+    fp  = _idf_disk_fingerprint(idf_src)
+    key = (_IDF_DISKCACHE_VERSION,
+           fp,
+           String(instrument_name), String(component_type), String(bank_prefix),
+           ψbins, ηbins, _norm_r_override(r_samp_override), center_on_sample,
+           # safety: Julia major/minor can affect Serialization compatibility
+           string(VERSION))
+
+    path = _disk_cache_path(idf_src, key; cache_dir=cache_dir)
+
+    if !rebuild && isfile(path)
+        # Validate cache key
+        ok = false
+        cached = try
+            deserialize(path)
+        catch
+            nothing
+        end
+
+        if cached !== nothing && cached isa NamedTuple && hasproperty(cached, :key) && hasproperty(cached, :payload)
+            ok = (cached.key == key)
+        end
+
+        if ok
+            @info "Loaded TOFtwin IDF disk-cache" cache = path
+            return cached.payload
+        else
+            @warn "Ignoring stale/invalid TOFtwin IDF disk-cache; rebuilding" cache = path
+        end
+    end
+
+    geo = load_mantid_idf(idf_src;
+        instrument_name=instrument_name,
+        component_type=component_type,
+        bank_prefix=bank_prefix,
+        ψbins=ψbins,
+        ηbins=ηbins,
+        r_samp_override=r_samp_override,
+        center_on_sample=center_on_sample)
+
+    # Write cache as (key, payload)
+    tmp = path * ".tmp"
+    serialize(tmp, (key=key, payload=geo))
+    mv(tmp, path; force=true)
+    @info "Wrote TOFtwin IDF disk-cache" cache = path
+
+    return geo
+end
+
+"""Clear the in-memory Mantid IDF cache (useful while iterating with Revise)."""
+function clear_mantid_idf_cache!()
+    empty!(_IDF_MEMCACHE)
+    return nothing
+end
+
+function _idf_cache_id(idf_src::AbstractString)
+    s = strip(idf_src)
+    if startswith(s, "<") || startswith(s, "<?xml")
+        # Cache by XML-content hash (best-effort; avoids huge keys)
+        return ("xml", hash(s))
+    else
+        # Cache by absolute path
+        return ("file", abspath(String(idf_src)))
+    end
+end
+
+"""Memoized wrapper around `load_mantid_idf` for the current Julia session."""
+function load_mantid_idf_cached(idf_src::AbstractString;
+    instrument_name::AbstractString = "CNCS",
+    component_type::AbstractString  = "detectors",
+    bank_prefix::AbstractString     = "bank",
+    ψbins::Int = 720,
+    ηbins::Int = 256,
+    r_samp_override = nothing,
+    center_on_sample::Bool = true,
+    copy::Bool = false)
+
+    key = (_idf_cache_id(idf_src),
+           String(instrument_name), String(component_type), String(bank_prefix),
+           ψbins, ηbins, _norm_r_override(r_samp_override), center_on_sample)
+
+    geo = get!(_IDF_MEMCACHE, key) do
+        load_mantid_idf(idf_src;
+            instrument_name=instrument_name,
+            component_type=component_type,
+            bank_prefix=bank_prefix,
+            ψbins=ψbins,
+            ηbins=ηbins,
+            r_samp_override=r_samp_override,
+            center_on_sample=center_on_sample)
+    end
+
+    return copy ? deepcopy(geo) : geo
+end
 
 const I3 = SMatrix{3,3,Float64,9}(1.0, 0.0, 0.0,
                                   0.0, 1.0, 0.0,
@@ -221,6 +401,10 @@ function _make_pixel(; id::Int, detid::Int,
     return TOFtwin.DetectorPixel(vals...)
 end
 
+# Fast path: avoid per-pixel reflection if DetectorPixel matches the expected fields.
+const _FAST_PIXEL_CTOR_OK = fieldnames(TOFtwin.DetectorPixel) ==
+    (:id, :mantid_id, :r_L, :ψ, :η, :iψ, :iη, :bank, :ΔΩ)
+
 # -------------------------
 # Main loader
 # -------------------------
@@ -246,7 +430,9 @@ function load_mantid_idf(idf_src::AbstractString;
     component_type::AbstractString  = "detectors",
     bank_prefix::AbstractString     = "bank",
     ψbins::Int = 720,
-    ηbins::Int = 256)
+    ηbins::Int = 256,
+    r_samp_override = nothing,
+    center_on_sample::Bool = true)
 
     @info "Loading IDF" idf_path = idf_src
 
@@ -269,6 +455,15 @@ function load_mantid_idf(idf_src::AbstractString;
         _parsef(_getattr(samp_locs[1], "y", "0")),
         _parsef(_getattr(samp_locs[1], "z", "0"))
     )
+
+    # Allow caller override (useful for geometry sanity checks against experiments)
+    if r_samp_override !== nothing
+        r_samp = SVector{3,Float64}(
+            Float64(r_samp_override[1]),
+            Float64(r_samp_override[2]),
+            Float64(r_samp_override[3])
+        )
+    end
 
     # ---- idlist for detectors (Mantid detector ids) ----
     detid_start = 0
@@ -311,12 +506,26 @@ function load_mantid_idf(idf_src::AbstractString;
         if !isempty(hnode); pix_height = _parsef(_getattr(hnode[1], "val", "0")); end
     end
 
+    pixel_area = (2*pix_radius) * pix_height
+
     # ---- expand hierarchy down to pixels ----
     pix_pos  = SVector{3,Float64}[]
     pix_bank = Symbol[]
     pix_ψ    = Float64[]
     pix_η    = Float64[]
     pix_dΩ   = Float64[]
+
+    # If the ID list range was present, preallocate (CNCS is ~51k pixels)
+    if detid_end >= detid_start
+        np_hint = detid_end - detid_start + 1
+        if np_hint > 0
+            sizehint!(pix_pos,  np_hint)
+            sizehint!(pix_bank, np_hint)
+            sizehint!(pix_ψ,    np_hint)
+            sizehint!(pix_η,    np_hint)
+            sizehint!(pix_dΩ,   np_hint)
+        end
+    end
 
     function expand_type(type_name::String,
                          t_parent::SVector{3,Float64},
@@ -336,14 +545,17 @@ function load_mantid_idf(idf_src::AbstractString;
             if isempty(locs)
                 # no explicit placement
                 if child_type == "pixel"
-                    rL = t_parent
-                    r  = rL - r_samp
-                    ψ, η = _psi_eta(r)
-                    push!(pix_pos, rL)
+                    r_abs = t_parent
+                    r_rel = r_abs - r_samp
+                    ψ, η = _psi_eta(r_rel)
+                    L2 = norm(r_rel)
+                    dΩ = (pixel_area > 0 && L2 > 0) ? pixel_area / (L2^2) : 1.0
+
+                    push!(pix_pos, center_on_sample ? r_rel : r_abs)
                     push!(pix_bank, bank_sym)
                     push!(pix_ψ, ψ)
                     push!(pix_η, η)
-                    push!(pix_dΩ, 1.0)
+                    push!(pix_dΩ, dΩ)
                 else
                     expand_type(child_type, t_parent, R_parent, bank_sym)
                 end
@@ -358,15 +570,14 @@ function load_mantid_idf(idf_src::AbstractString;
                 R_new = R_parent * R_loc
 
                 if child_type == "pixel"
-                    rL = t_new
-                    r  = rL - r_samp
-                    ψ, η = _psi_eta(r)
+                    r_abs = t_new
+                    r_rel = r_abs - r_samp
+                    ψ, η = _psi_eta(r_rel)
 
-                    L2 = norm(r)
-                    area = (2*pix_radius) * pix_height
-                    dΩ = (area > 0 && L2 > 0) ? area / (L2^2) : 1.0
+                    L2 = norm(r_rel)
+                    dΩ = (pixel_area > 0 && L2 > 0) ? pixel_area / (L2^2) : 1.0
 
-                    push!(pix_pos, rL)
+                    push!(pix_pos, center_on_sample ? r_rel : r_abs)
                     push!(pix_bank, bank_sym)
                     push!(pix_ψ, ψ)
                     push!(pix_η, η)
@@ -409,7 +620,7 @@ function load_mantid_idf(idf_src::AbstractString;
 
     pixels = Vector{TOFtwin.DetectorPixel}(undef, np)
 
-    for i in 1:np
+    @inbounds for i in 1:np
         rL = TOFtwin.Vec3(pix_pos[i]...)
         ψ  = pix_ψ[i]
         η  = pix_η[i]
@@ -422,8 +633,12 @@ function load_mantid_idf(idf_src::AbstractString;
 
         detid = detid_start + (i - 1)
 
-        pixels[i] = _make_pixel(id=i, detid=detid, r_L=rL, ψ=ψ, η=η,
-                                iψ=iψ, iη=iη, bank=bank, ΔΩ=dΩ)
+        if _FAST_PIXEL_CTOR_OK
+            pixels[i] = TOFtwin.DetectorPixel(i, detid, rL, ψ, η, iψ, iη, bank, dΩ)
+        else
+            pixels[i] = _make_pixel(id=i, detid=detid, r_L=rL, ψ=ψ, η=η,
+                                    iψ=iψ, iη=iη, bank=bank, ΔΩ=dΩ)
+        end
     end
 
     inst = TOFtwin.Instrument(name=instrument_name, L1=L1, pixels=pixels)
@@ -433,6 +648,8 @@ function load_mantid_idf(idf_src::AbstractString;
     meta = (L1=L1,
             detid_start=detid_start,
             detid_end=detid_end,
+            r_samp=r_samp,
+            center_on_sample=center_on_sample,
             pixel_radius=pix_radius,
             pixel_height=pix_height,
             npixels=np)
@@ -440,6 +657,10 @@ function load_mantid_idf(idf_src::AbstractString;
     return (inst=inst, bank=bank, pixels=pixels, meta=meta)
 end
 
-export load_mantid_idf
+export load_mantid_idf,
+       load_mantid_idf_cached,
+       load_mantid_idf_diskcached,
+       clear_mantid_idf_cache!,
+       clear_mantid_idf_disk_cache!
 
 end # module MantidIDF
