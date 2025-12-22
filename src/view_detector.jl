@@ -6,6 +6,80 @@
 using Statistics
 
 """
+    load_instrument_idf(idf_path; cached=true, kwargs...)
+
+Load a Mantid IDF instrument, preferring the newer disk-cache loader when available.
+
+This is a thin compatibility shim so scripts/examples can load instruments quickly
+without needing to know whether the project is using the legacy loader
+(`TOFtwin.load_mantid_idf`) or the newer disk-cached loader
+(`TOFtwin.MantidIDF.load_mantid_idf_diskcached`).
+
+Returns whatever the underlying loader returns (typically an `out` object with
+fields like `inst`, `pixels`, and `meta`).
+"""
+function load_instrument_idf(idf_path::AbstractString; cached::Bool=true, kwargs...)
+    # Prefer the new disk-cached path when present.
+    if cached && isdefined(@__MODULE__, :MantidIDF) && isdefined(MantidIDF, :load_mantid_idf_diskcached)
+        return MantidIDF.load_mantid_idf_diskcached(idf_path; kwargs...)
+    end
+
+    # Fall back to submodule loader if present.
+    if isdefined(@__MODULE__, :MantidIDF) && isdefined(MantidIDF, :load_mantid_idf)
+        return MantidIDF.load_mantid_idf(idf_path; kwargs...)
+    end
+
+    # Final fall back: legacy top-level loader.
+    if isdefined(@__MODULE__, :load_mantid_idf)
+        return load_mantid_idf(idf_path; kwargs...)
+    end
+
+    error("No Mantid IDF loader found. Expected MantidIDF.load_mantid_idf_diskcached / MantidIDF.load_mantid_idf / load_mantid_idf")
+end
+
+"""
+    detector_cloud_from_idf(idf_path; r_samp=nothing, bank_regex=nothing, ψstride=1, ηstride=1,
+                            cached=true, kwargs...)
+
+Convenience helper: load an IDF instrument (optionally disk-cached) and immediately
+build a plotting-friendly detector cloud via [`detector_cloud`](@ref).
+
+Returns a NamedTuple: `(cloud, inst, meta, out)`.
+"""
+function detector_cloud_from_idf(idf_path::AbstractString;
+    r_samp = nothing,
+    bank_regex = nothing,
+    ψstride::Int = 1,
+    ηstride::Int = 1,
+    cached::Bool = true,
+    kwargs...,
+)
+    out = load_instrument_idf(idf_path; cached=cached, kwargs...)
+    inst = getproperty(out, :inst)
+
+    r_samp_L = r_samp === nothing ? inst.r_samp_L : r_samp
+
+    # Prefer pixels stored on the instrument; otherwise fall back to `out.pixels`.
+    pixels = if hasproperty(inst, :pixels)
+        inst.pixels
+    elseif hasproperty(out, :pixels)
+        out.pixels
+    else
+        error("No pixels found on instrument/output. Expected `inst.pixels` or `out.pixels`.")
+    end
+
+    cloud = detector_cloud(pixels;
+        r_samp=r_samp_L,
+        bank_regex=bank_regex,
+        ψstride=ψstride,
+        ηstride=ηstride,
+    )
+
+    meta = hasproperty(out, :meta) ? out.meta : nothing
+    return (cloud=cloud, inst=inst, meta=meta, out=out)
+end
+
+"""
     filter_pixels(pixels; bank_regex=nothing)
 
 Filter pixels by bank name (Symbol -> String). If bank_regex is nothing, return unchanged.

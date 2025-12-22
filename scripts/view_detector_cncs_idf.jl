@@ -20,11 +20,17 @@ else
 end
 
 function view_cncs(; cfg=CFG)
-    out = TOFtwin.load_mantid_idf(cfg[:idf_path])
-    inst = out.inst
+    # Uses the newer disk-cached loader when available (and falls back to legacy paths).
+    out = TOFtwin.load_instrument_idf(cfg[:idf_path]; cached=true)
+    hasproperty(out, :meta) && @info "IDF loaded" out.meta
+
+    inst   = out.inst
     r_samp = inst.r_samp_L
 
-    cloud = TOFtwin.detector_cloud(inst.pixels;
+    # Pixels may live on `inst` or in `out`; prefer `inst.pixels`.
+    pixels = hasproperty(inst, :pixels) ? inst.pixels : out.pixels
+
+    cloud = TOFtwin.detector_cloud(pixels;
         r_samp=r_samp,
         bank_regex=cfg[:bank_regex],
         ψstride=cfg[:ψstride],
