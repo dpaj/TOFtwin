@@ -24,7 +24,7 @@ pixels_all = geo.pixels
 @info "CNCS loaded" geo.meta
 
 # Decimate aggressively to keep it fast while iterating
-pix_used = TOFtwin.decimate_pixels_angular(pixels_all; ψstride=6, ηstride=4)
+pix_used = TOFtwin.decimate_pixels_angular(pixels_all; ψstride=1, ηstride=1)
 @info "pixels used = $(length(pix_used)) / $(length(pixels_all))"
 @info "Threads = $(nthreads())"
 

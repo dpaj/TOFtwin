@@ -4,6 +4,20 @@ using Revise
 using TOFtwin
 using JLD2
 
+# -----------------------------------------------------------------------------
+# Demo: Powder prediction from a Sunny.jl powder table, using a Mantid IDF instrument.
+#
+# Choose instrument via env var:
+#   TOFTWIN_INSTRUMENT=CNCS    julia --project=. scripts/demo_powder_from_sunny_with_idf.jl
+#   TOFTWIN_INSTRUMENT=SEQUOIA julia --project=. scripts/demo_powder_from_sunny_with_idf.jl
+#
+# Optional knobs:
+#   TOFTWIN_BACKEND=gl|cairo
+#   TOFTWIN_REBUILD_GEOM=0|1
+#   TOFTWIN_PSI_STRIDE, TOFTWIN_ETA_STRIDE
+#   TOFTWIN_EI (meV), TOFTWIN_NTOF, TOFTWIN_NQBINS, TOFTWIN_NWBINS
+# -----------------------------------------------------------------------------
+
 # Backend selection
 backend = lowercase(get(ENV, "TOFTWIN_BACKEND", "gl"))
 if backend == "gl"
@@ -32,8 +46,28 @@ function load_sunny_powder_jld2(path::AbstractString; outside=0.0)
     end
     @assert size(S) == (length(Q), length(W))
 
-    return GridKernelPowder(Q, W, S; outside=outside)
+    # IMPORTANT: TOFtwin already defines GridKernelPowder; do not redefine it here.
+    return TOFtwin.GridKernelPowder(Q, W, S; outside=outside)
 end
+
+# -----------------------------
+# Instrument selection
+# -----------------------------
+function parse_instrument()
+    s = uppercase(get(ENV, "TOFTWIN_INSTRUMENT", "SEQUOIA"))
+    if s in ("CNCS",)
+        return :CNCS
+    elseif s in ("SEQUOIA", "SEQ")
+        return :SEQUOIA
+    else
+        throw(ArgumentError("TOFTWIN_INSTRUMENT must be CNCS or SEQUOIA (got '$s')"))
+    end
+end
+
+instr = parse_instrument()
+
+idf_path = instr === :CNCS ? joinpath(@__DIR__, "CNCS_Definition_2025B.xml") :
+                            joinpath(@__DIR__, "SEQUOIA_Definition.xml")
 
 # -----------------------------
 # Input Sunny file
@@ -44,9 +78,8 @@ sunny_path = length(ARGS) > 0 ? ARGS[1] : joinpath(@__DIR__, "..", "sunny_powder
 kern = load_sunny_powder_jld2(sunny_path; outside=0.0)
 
 # -----------------------------
-# CNCS IDF -> Instrument
+# IDF -> Instrument
 # -----------------------------
-idf_path = joinpath(@__DIR__, "CNCS_Definition_2025B.xml")
 rebuild_geom = lowercase(get(ENV, "TOFTWIN_REBUILD_GEOM", "0")) in ("1","true","yes")
 
 # Use the on-disk processed geometry cache (fast on subsequent runs).
@@ -65,18 +98,21 @@ else
     TOFtwin.DetectorBank(inst.name, out.pixels)
 end
 
-# Speed knob: subsample pixels while iterating (CNCS is ~51k pixels)
-ψstride = parse(Int, get(ENV, "TOFTWIN_PSI_STRIDE", "1"))
-ηstride = parse(Int, get(ENV, "TOFTWIN_ETA_STRIDE", "1"))
+# Speed knob: subsample pixels while iterating
+default_stride = instr === :SEQUOIA ? "1" : "1"
+ψstride = parse(Int, get(ENV, "TOFTWIN_PSI_STRIDE", default_stride))
+ηstride = parse(Int, get(ENV, "TOFTWIN_ETA_STRIDE", default_stride))
 pix_used = sample_pixels(bank, AngularDecimate(ψstride, ηstride))
 
+@info "Instrument = $instr"
 @info "IDF: $idf_path"
 @info "pixels used = $(length(pix_used)) (of $(length(bank.pixels)))  stride=(ψ=$ψstride, η=$ηstride)"
 
 # -----------------------------
 # Axes / TOF
 # -----------------------------
-Ei = parse(Float64, get(ENV, "TOFTWIN_EI", "12.0"))  # meV
+default_Ei = instr === :SEQUOIA ? "30.0" : "12.0"
+Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
 # TOF range based on geometry
 L2min = minimum(inst.L2)
@@ -94,7 +130,6 @@ tof_edges = collect(range(tmin, tmax; length=ntof+1))
 
 # -----------------------------
 # Choose comparison grid (Q_edges, ω_edges)
-# Keep it focused to the Sunny domain (and include ω<0 if you want)
 # -----------------------------
 nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
 nωbins = parse(Int, get(ENV, "TOFTWIN_NWBINS", "240"))
@@ -138,17 +173,17 @@ fig = Figure(size=(1400, 900))
 ax1 = Axis(fig[1,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="Sunny kernel S(|Q|,ω) on TOFtwin grid")
 heatmap!(ax1, Q_cent, ω_cent, kernel_grid)
 
-ax2 = Axis(fig[1,2], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin predicted (raw SUM) — CNCS IDF")
+ax2 = Axis(fig[1,2], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin predicted (raw SUM) — $(String(instr)) IDF")
 heatmap!(ax2, Q_cent, ω_cent, raw_sum)
 
-ax3 = Axis(fig[2,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin weights log10(N+1) — CNCS IDF")
+ax3 = Axis(fig[2,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin weights log10(N+1) — $(String(instr)) IDF")
 heatmap!(ax3, Q_cent, ω_cent, wt_log)
 
 ax4 = Axis(fig[2,2], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="TOFtwin vanadium-normalized MEAN + kernel contours")
 heatmap!(ax4, Q_cent, ω_cent, mean_map)
 contour!(ax4, Q_cent, ω_cent, kernel_grid; color=:white, linewidth=1.0)
 
-outpng = joinpath(outdir, "demo_powder_from_sunny_with_cncs_idf.png")
+outpng = joinpath(outdir, "demo_powder_from_sunny_with_$(lowercase(String(instr)))_idf.png")
 save(outpng, fig)
 @info "Wrote $outpng"
 display(fig)

@@ -465,26 +465,64 @@ function load_mantid_idf(idf_src::AbstractString;
         )
     end
 
-    # ---- idlist for detectors (Mantid detector ids) ----
-    detid_start = 0
-    detid_end   = -1
+    # ---- detector idlists (Mantid detector IDs) ----
+    # Some IDFs (e.g. CNCS) define a single <component type="detectors" idlist="detectors"> and a
+    # matching <idlist idname="detectors">. Others (e.g. SEQUOIA) define multiple instrument-level
+    # components with their own idlists ("A row", "B row", ...). We support both.
+    detids = Int[]
 
-    # Find <component type="detectors" idlist="...">
-    det_comp = EzXML.findall("/*[local-name()='instrument']/*[local-name()='component' and @type='detectors']", root)
-    if !isempty(det_comp)
-        idlist_name = _getattr(det_comp[1], "idlist", "")
-        if !isempty(idlist_name)
-            idlists = EzXML.findall("/*[local-name()='instrument']/*[local-name()='idlist' and @idname='$idlist_name']", root)
-            if !isempty(idlists)
-                rng = EzXML.findall("./*[local-name()='id']", idlists[1])
-                if !isempty(rng)
-                    detid_start = _parsei(_getattr(rng[1], "start", "0"), 0)
-                    detid_end   = _parsei(_getattr(rng[1], "end",   "-1"), -1)
+    function _push_idlist!(out::Vector{Int}, idlist_name::String)
+        isempty(idlist_name) && return
+        idlists = EzXML.findall("/*[local-name()='instrument']/*[local-name()='idlist' and @idname='$idlist_name']", root)
+        isempty(idlists) && return
+
+        for idnode in EzXML.findall("./*[local-name()='id']", idlists[1])
+            # Either <id val="..."/> or <id start="..." end="..." [step="..."] />
+            val = _getattr(idnode, "val", "")
+            if !isempty(val)
+                push!(out, _parsei(val, 0))
+                continue
+            end
+
+            s = _getattr(idnode, "start", "")
+            e = _getattr(idnode, "end", "")
+            isempty(s) && continue
+            isempty(e) && continue
+
+            st = _parsei(s, 0)
+            en = _parsei(e, st)
+            step = _parsei(_getattr(idnode, "step", "1"), 1)
+            step == 0 && (step = 1)
+
+            if st <= en
+                for v in st:step:en
+                    push!(out, v)
+                end
+            else
+                # Rare, but handle descending ranges
+                for v in st:-abs(step):en
+                    push!(out, v)
                 end
             end
         end
     end
 
+    # CNCS-style: component type="detectors" has an idlist
+    det_comp = EzXML.findall("/*[local-name()='instrument']/*[local-name()='component' and @type='detectors' and @idlist]", root)
+    if !isempty(det_comp)
+        _push_idlist!(detids, _getattr(det_comp[1], "idlist", ""))
+    else
+        # SEQUOIA-style: instrument-level detector group components each have an idlist
+        root_comps = EzXML.findall("/*[local-name()='instrument']/*[local-name()='component' and @idlist]", root)
+        for rc in root_comps
+            idname = _getattr(rc, "idlist", "")
+            idname == "monitors" && continue
+            _push_idlist!(detids, idname)
+        end
+    end
+
+    detid_start = isempty(detids) ? 0  : minimum(detids)
+    detid_end   = isempty(detids) ? -1 : maximum(detids)
     # ---- collect <type name="..."> nodes into dict ----
     types = Dict{String,EzXML.Node}()
     type_nodes = EzXML.findall("/*[local-name()='instrument']/*[local-name()='type']", root)
@@ -493,7 +531,7 @@ function load_mantid_idf(idf_src::AbstractString;
         isempty(nm) && continue
         types[nm] = t
     end
-    haskey(types, component_type) || error("IDF has no <type name=\"$component_type\">")
+    has_det_type = haskey(types, component_type)
 
     # ---- pixel geometry for ΔΩ estimate ----
     pix_radius = 0.0
@@ -515,8 +553,15 @@ function load_mantid_idf(idf_src::AbstractString;
     pix_η    = Float64[]
     pix_dΩ   = Float64[]
 
-    # If the ID list range was present, preallocate (CNCS is ~51k pixels)
-    if detid_end >= detid_start
+    # If we have a detector idlist, we can preallocate roughly the right number of pixels.
+    if !isempty(detids)
+        np_hint = length(detids)
+        sizehint!(pix_pos,  np_hint)
+        sizehint!(pix_bank, np_hint)
+        sizehint!(pix_ψ,    np_hint)
+        sizehint!(pix_η,    np_hint)
+        sizehint!(pix_dΩ,   np_hint)
+    elseif detid_end >= detid_start
         np_hint = detid_end - detid_start + 1
         if np_hint > 0
             sizehint!(pix_pos,  np_hint)
@@ -589,35 +634,56 @@ function load_mantid_idf(idf_src::AbstractString;
         end
     end
 
-    det_type = types[component_type]
-    bank_comps = EzXML.findall("./*[local-name()='component']", det_type)
+    if has_det_type
+        det_type = types[component_type]
+        bank_comps = EzXML.findall("./*[local-name()='component']", det_type)
 
-    for bc in bank_comps
-        btype = _getattr(bc, "type", "")
-        isempty(btype) && continue
-        startswith(btype, bank_prefix) || continue
+        for bc in bank_comps
+            btype = _getattr(bc, "type", "")
+            isempty(btype) && continue
+            startswith(btype, bank_prefix) || continue
 
-        locs = EzXML.findall("./*[local-name()='location']", bc)
-        isempty(locs) && continue
+            locs = EzXML.findall("./*[local-name()='location']", bc)
+            isempty(locs) && continue
 
-        # detectors -> bank placement is specified here
-        loc = locs[1]
-        t0  = _xyz_from_location(loc)
-        R0  = _R_from_location(loc)
+            # detectors -> bank placement is specified here
+            for loc in locs
+                t0  = _xyz_from_location(loc)
+                R0  = _R_from_location(loc)
+                expand_type(btype, t0, R0, Symbol(btype))
+            end
+        end
+    else
+        # Fallback for IDFs like SEQUOIA: instrument-level components carry idlists (A row/B row/...).
+        root_comps = EzXML.findall("/*[local-name()='instrument']/*[local-name()='component' and @idlist]", root)
+        for rc in root_comps
+            idname = _getattr(rc, "idlist", "")
+            idname == "monitors" && continue
 
-        expand_type(btype, t0, R0, Symbol(btype))
-    end
+            rtype = _getattr(rc, "type", "")
+            isempty(rtype) && continue
+            haskey(types, rtype) || (@warn "No <type name=\"$rtype\"> for idlist component \"$idname\"; skipping."; continue)
 
-    np = length(pix_pos)
+            bank_sym = Symbol(replace(rtype, " " => "_"))
 
-    # sanity vs idlist range if present
-    if detid_end >= detid_start
-        expected = detid_end - detid_start + 1
-        if expected != np
-            @warn "Pixel count ($np) does not match IDF detector idlist range ($expected). Mantid IDs may be off."
+            locs = EzXML.findall("./*[local-name()='location']", rc)
+            if isempty(locs)
+                expand_type(rtype, SVector{3,Float64}(0.0, 0.0, 0.0), I3, bank_sym)
+            else
+                for loc in locs
+                    t0 = _xyz_from_location(loc)
+                    R0 = _R_from_location(loc)
+                    expand_type(rtype, t0, R0, bank_sym)
+                end
+            end
         end
     end
+    np = length(pix_pos)
 
+    # sanity vs idlist length if present
+    if !isempty(detids) && length(detids) != np
+        @warn "Pixel count ($np) does not match IDF idlist count ($(length(detids))). Mantid IDs may be off."
+    end
     pixels = Vector{TOFtwin.DetectorPixel}(undef, np)
 
     @inbounds for i in 1:np
@@ -631,7 +697,7 @@ function load_mantid_idf(idf_src::AbstractString;
         bank = pix_bank[i]
         dΩ   = pix_dΩ[i]
 
-        detid = detid_start + (i - 1)
+        detid = !isempty(detids) ? detids[i] : (detid_start + (i - 1))
 
         if _FAST_PIXEL_CTOR_OK
             pixels[i] = TOFtwin.DetectorPixel(i, detid, rL, ψ, η, iψ, iη, bank, dΩ)

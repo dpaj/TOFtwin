@@ -4,7 +4,7 @@ using Revise
 using TOFtwin
 
 # -------- live knobs --------
-const CFG = Dict(
+CFG = Dict(
     :backend    => :gl,          # :gl or :cairo
     :L2         => 3.5,
     :surface    => :cylinder,    # :cylinder or :sphere

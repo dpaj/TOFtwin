@@ -5,6 +5,30 @@
 
 using Statistics
 
+
+"""
+    idf_path(instr::Symbol) -> String
+
+Resolve a built-in instrument name to an IDF path inside the TOFtwin repo.
+"""
+function idf_path(instr::Symbol)
+    scripts_dir = normpath(joinpath(@__DIR__, "..", "scripts"))
+    if instr === :CNCS
+        return joinpath(scripts_dir, "CNCS_Definition_2025B.xml")
+    elseif instr === :SEQUOIA
+        return joinpath(scripts_dir, "SEQUOIA_Definition.xml")
+    else
+        throw(ArgumentError("Unknown instrument symbol: $instr. Expected :CNCS or :SEQUOIA (or pass an explicit IDF path)."))
+    end
+end
+
+# Symbol overloads for convenience in scripts.
+load_instrument_idf(instr::Symbol; cached::Bool=true, kwargs...) =
+    load_instrument_idf(idf_path(instr); cached=cached, kwargs...)
+
+detector_cloud_from_idf(instr::Symbol; kwargs...) =
+    detector_cloud_from_idf(idf_path(instr); kwargs...)
+
 """
     load_instrument_idf(idf_path; cached=true, kwargs...)
 

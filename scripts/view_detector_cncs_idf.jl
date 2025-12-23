@@ -1,16 +1,21 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
+
 using Revise
 using TOFtwin
 
-const CFG = Dict(
+# Simple detector-view script for CNCS Mantid IDF.
+# Produces a 2D X–Z projection (lab frame) and saves a PNG.
+
+CFG = Dict(
     :backend    => :gl,   # :gl or :cairo
     :idf_path   => joinpath(@__DIR__, "CNCS_Definition_2025B.xml"),
-    :bank_regex => nothing,   # e.g. r"bank29" to focus
+    :bank_regex => nothing,  # e.g. r"bank29" to focus
     :ψstride    => 1,
     :ηstride    => 1,
     :out_path   => "out/view_detector_cncs.png",
     :save       => true,
+    :rebuild    => false,
 )
 
 if CFG[:backend] == :cairo
@@ -20,51 +25,33 @@ else
 end
 
 function view_cncs(; cfg=CFG)
-    # Uses the newer disk-cached loader when available (and falls back to legacy paths).
-    out = TOFtwin.load_instrument_idf(cfg[:idf_path]; cached=true)
-    hasproperty(out, :meta) && @info "IDF loaded" out.meta
-
-    inst   = out.inst
-    r_samp = inst.r_samp_L
-
-    # Pixels may live on `inst` or in `out`; prefer `inst.pixels`.
-    pixels = hasproperty(inst, :pixels) ? inst.pixels : out.pixels
-
-    cloud = TOFtwin.detector_cloud(pixels;
-        r_samp=r_samp,
-        bank_regex=cfg[:bank_regex],
-        ψstride=cfg[:ψstride],
-        ηstride=cfg[:ηstride],
+    out = TOFtwin.detector_cloud_from_idf(cfg[:idf_path];
+        bank_regex = cfg[:bank_regex],
+        ψstride    = cfg[:ψstride],
+        ηstride    = cfg[:ηstride],
+        cached     = true,
+        rebuild    = cfg[:rebuild],
     )
 
-    fig = Figure(size=(1100, 850))
-    ax  = Axis3(fig[1,1], aspect=:data, xlabel="x (m)", ylabel="y (m)", zlabel="z (m)",
-                title="CNCS from IDF (N=$(length(cloud.pixels_used)))")
+    cloud = out.cloud
 
-    scatter!(ax, [r_samp[1]], [r_samp[2]], [r_samp[3]], markersize=18)
+    fig = Figure(size=(1000, 650))
+    ax  = Axis(fig[1,1];
+        xlabel = "x (m)",
+        ylabel = "z (m)",
+        title  = "CNCS detector coverage (X–Z projection)",
+    )
 
-    ms = 2.5
-    scatter!(ax, cloud.xs[cloud.idxL], cloud.ys[cloud.idxL], cloud.zs[cloud.idxL];
-             markersize=ms, marker=:circle, label="x < x_sample")
-    scatter!(ax, cloud.xs[cloud.idxR], cloud.ys[cloud.idxR], cloud.zs[cloud.idxR];
-             markersize=ms, marker=:rect, label="x ≥ x_sample")
+    scatter!(ax, cloud.xs[cloud.idxL], cloud.zs[cloud.idxL], markersize=2, label="x < x_samp")
+    scatter!(ax, cloud.xs[cloud.idxR], cloud.zs[cloud.idxR], markersize=2, label="x ≥ x_samp")
 
-    # beam (+z)
-    lines!(ax, [r_samp[1], r_samp[1]],
-              [r_samp[2], r_samp[2]],
-              [r_samp[3], r_samp[3] + max(4.0, 1.2*cloud.ringR)])
+    axislegend(ax; position=:rb)
 
-    # ring at y = sample y
-    θ = range(-pi, pi; length=361)
-    ringx = r_samp[1] .+ cloud.ringR .* sin.(θ)
-    ringy = r_samp[2] .+ 0.0 .* θ
-    ringz = r_samp[3] .+ cloud.ringR .* cos.(θ)
-    lines!(ax, ringx, ringy, ringz)
-
-    axislegend(ax)
+    n_used = length(cloud.xs)
+    Label(fig[2,1], "pixels used = $n_used   (ψstride=$(cfg[:ψstride]), ηstride=$(cfg[:ηstride]))"; tellwidth=false)
 
     if cfg[:save]
-        mkpath("out")
+        mkpath(dirname(cfg[:out_path]))
         save(cfg[:out_path], fig)
         @info "Wrote $(cfg[:out_path])"
     end
