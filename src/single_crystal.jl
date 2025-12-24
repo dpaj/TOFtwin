@@ -85,6 +85,7 @@ function predict_cut_mean_Hω(inst::Instrument;
     recip::ReciprocalLattice,
     pose::Pose,
     model,
+    resolution::AbstractResolutionModel = NoResolution(),
     eps::Float64=1e-12,
     K_center::Float64=0.0,
     K_halfwidth::Float64=0.1,
@@ -107,19 +108,24 @@ function predict_cut_mean_Hω(inst::Instrument;
             t  = 0.5*(t0 + t1)
             dt = t1 - t0
 
-            Ef = try
-                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
-            catch
-                continue
+            δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
+            @inbounds for j in 1:length(δts)
+                tj = t + δts[j]
+
+                Ef = try
+                    Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                catch
+                    continue
+                end
+                (Ef <= 0 || Ef > Ei_meV) && continue
+
+                Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+                Q_S = R_SL * Q_L
+
+                jac = ws[j] * abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt * Ω
+                Cs[p.id, it] += model(Q_S, ω) * jac
+                Cv[p.id, it] += 1.0 * jac
             end
-            (Ef <= 0 || Ef > Ei_meV) && continue
-
-            Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
-            Q_S = R_SL * Q_L
-
-            jac = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt * Ω
-            Cs[p.id, it] += model(Q_S, ω) * jac
-            Cv[p.id, it] += 1.0 * jac
         end
     end
 
@@ -454,6 +460,7 @@ function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
     aln::SampleAlignment,
     R_SL_list::AbstractVector,
     model_hkl,
+    resolution::AbstractResolutionModel = NoResolution(),
     eps::Float64=1e-12,
     K_center::Float64=0.0,
     K_halfwidth::Float64=0.1,
@@ -461,11 +468,17 @@ function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
     L_halfwidth::Float64=0.1,
     threaded::Bool=true)
 
-    kin = precompute_pixel_tof_kinematics(inst, pixels, Ei_meV, tof_edges_s)
+    # Fast path uses precomputed (pixel,TOF)->(Q_L,ω,jacdt) with *no* resolution.
+    # If a nontrivial resolution model is provided, fall back to on-the-fly kinematics
+    # with a small timing quadrature at each TOF bin.
+    kin = (resolution isa NoResolution) ?
+        precompute_pixel_tof_kinematics(inst, pixels, Ei_meV, tof_edges_s) : nothing
 
-    QLx, QLy, QLz = kin.QLx, kin.QLy, kin.QLz
-    ωL, jacdt = kin.ωL, kin.jacdt
-    itmin, itmax = kin.itmin, kin.itmax
+    if kin !== nothing
+        QLx, QLy, QLz = kin.QLx, kin.QLy, kin.QLz
+        ωL, jacdt = kin.ωL, kin.jacdt
+        itmin, itmax = kin.itmin, kin.itmax
+    end
 
     np = length(pixels)
 
@@ -477,31 +490,74 @@ function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
         Hsum = Hsum_thr[tid]
         Hwt  = Hwt_thr[tid]
 
-        @inbounds for ip in 1:np
-            hi = itmax[ip]
-            hi == 0 && continue
-            lo = itmin[ip]
+        if kin !== nothing
+            @inbounds for ip in 1:np
+                hi = itmax[ip]
+                hi == 0 && continue
+                lo = itmin[ip]
 
-            for it in lo:hi
-                w = jacdt[ip,it]
-                w == 0.0 && continue
+                for it in lo:hi
+                    w = jacdt[ip,it]
+                    w == 0.0 && continue
 
-                # Q_S = R_SL * Q_L (manual multiply to avoid temporaries)
-                qlx = QLx[ip,it]; qly = QLy[ip,it]; qlz = QLz[ip,it]
-                qsx = R_SL[1,1]*qlx + R_SL[1,2]*qly + R_SL[1,3]*qlz
-                qsy = R_SL[2,1]*qlx + R_SL[2,2]*qly + R_SL[2,3]*qlz
-                qsz = R_SL[3,1]*qlx + R_SL[3,2]*qly + R_SL[3,3]*qlz
-                Q_S = Vec3(qsx, qsy, qsz)
+                    # Q_S = R_SL * Q_L (manual multiply to avoid temporaries)
+                    qlx = QLx[ip,it]; qly = QLy[ip,it]; qlz = QLz[ip,it]
+                    qsx = R_SL[1,1]*qlx + R_SL[1,2]*qly + R_SL[1,3]*qlz
+                    qsy = R_SL[2,1]*qlx + R_SL[2,2]*qly + R_SL[2,3]*qlz
+                    qsz = R_SL[3,1]*qlx + R_SL[3,2]*qly + R_SL[3,3]*qlz
+                    Q_S = Vec3(qsx, qsy, qsz)
 
-                ω = ωL[ip,it]
-                hkl = hkl_from_Q_S(aln, Q_S)
-                Hh, Kk, Ll = hkl
+                    ω = ωL[ip,it]
+                    hkl = hkl_from_Q_S(aln, Q_S)
+                    Hh, Kk, Ll = hkl
 
-                (abs(Kk - K_center) > K_halfwidth) && continue
-                (abs(Ll - L_center) > L_halfwidth) && continue
+                    (abs(Kk - K_center) > K_halfwidth) && continue
+                    (abs(Ll - L_center) > L_halfwidth) && continue
 
-                deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
-                deposit_bilinear!(Hwt,  Hh, ω, w)
+                    deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
+                    deposit_bilinear!(Hwt,  Hh, ω, w)
+                end
+            end
+        else
+            n_tof = length(tof_edges_s) - 1
+            @inbounds for ip in 1:np
+                p = pixels[ip]
+                Ω = pixel_Ω(p)
+                L2p = L2(inst, p.id)
+
+                for it in 1:n_tof
+                    t0 = Float64(tof_edges_s[it])
+                    t1 = Float64(tof_edges_s[it+1])
+                    t  = 0.5*(t0 + t1)
+                    dt = (t1 - t0)
+
+                    δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
+                    for j in 1:length(δts)
+                        tj = t + δts[j]
+                        Ef = try
+                            Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                        catch
+                            continue
+                        end
+                        (Ef <= 0 || Ef > Ei_meV) && continue
+
+                        Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+                        # Q_S = R_SL*Q_L
+                        qsx = R_SL[1,1]*Q_L[1] + R_SL[1,2]*Q_L[2] + R_SL[1,3]*Q_L[3]
+                        qsy = R_SL[2,1]*Q_L[1] + R_SL[2,2]*Q_L[2] + R_SL[2,3]*Q_L[3]
+                        qsz = R_SL[3,1]*Q_L[1] + R_SL[3,2]*Q_L[2] + R_SL[3,3]*Q_L[3]
+                        Q_S = Vec3(qsx, qsy, qsz)
+
+                        hkl = hkl_from_Q_S(aln, Q_S)
+                        Hh, Kk, Ll = hkl
+                        (abs(Kk - K_center) > K_halfwidth) && continue
+                        (abs(Ll - L_center) > L_halfwidth) && continue
+
+                        w = ws[j] * abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt * Ω
+                        deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
+                        deposit_bilinear!(Hwt,  Hh, ω, w)
+                    end
+                end
             end
         end
     end

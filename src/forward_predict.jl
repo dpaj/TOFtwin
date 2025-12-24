@@ -17,7 +17,8 @@ function predict_hist_Qω_powder(inst::Instrument;
     tof_edges_s::Vector{Float64},
     Q_edges::Vector{Float64},
     ω_edges::Vector{Float64},
-    model)
+    model,
+    resolution::AbstractResolutionModel = NoResolution())
 
     H = Hist2D(Q_edges, ω_edges)
 
@@ -30,21 +31,25 @@ function predict_hist_Qω_powder(inst::Instrument;
             t  = 0.5*(t0 + t1)
             dt = (t1 - t0)
 
-            Ef = try
-                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
-            catch
-                continue
+            δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
+            @inbounds for j in 1:length(δts)
+                tj = t + δts[j]
+                Ef = try
+                    Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                catch
+                    continue
+                end
+                (Ef <= 0 || Ef > Ei_meV) && continue
+
+                Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+                Qmag = norm(Q)
+
+                # expected counts per TOF bin ~ E[ S(Q,ω) * dω ] * ΔΩ
+                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt
+                w = ws[j] * model(Qmag, ω) * jacdt * p.ΔΩ
+
+                deposit_bilinear!(H, Qmag, ω, w)
             end
-            (Ef <= 0 || Ef > Ei_meV) && continue
-
-            Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
-            Qmag = norm(Q)
-
-            # expected counts per TOF bin ~ S(Q,ω) * dω * ΔΩ = S * |dω/dt| dt * ΔΩ
-            jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
-            w = model(Qmag, ω) * jacdt * p.ΔΩ
-
-            deposit_bilinear!(H, Qmag, ω, w)
         end
     end
 
@@ -56,7 +61,8 @@ function predict_pixel_tof(inst::Instrument;
     pixels::Vector{DetectorPixel},
     Ei_meV::Float64,
     tof_edges_s::Vector{Float64},
-    model)
+    model,
+    resolution::AbstractResolutionModel = NoResolution())
 
     n_pix = length(inst.pixels)
     n_tof = length(tof_edges_s) - 1
@@ -70,19 +76,24 @@ function predict_pixel_tof(inst::Instrument;
             t  = 0.5*(t0 + t1)
             dt = t1 - t0
 
-            Ef = try
-                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
-            catch
-                continue
+            δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
+            acc = 0.0
+            @inbounds for j in 1:length(δts)
+                tj = t + δts[j]
+                Ef = try
+                    Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                catch
+                    continue
+                end
+                (Ef <= 0 || Ef > Ei_meV) && continue
+
+                Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+                Qmag = norm(Q)
+
+                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt
+                acc += ws[j] * model(Qmag, ω) * jacdt
             end
-            (Ef <= 0 || Ef > Ei_meV) && continue
-
-            Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
-            Qmag = norm(Q)
-
-            # expected counts per TOF bin ~ S(Q,ω) * dω * ΔΩ = S * |dω/dt| dt * ΔΩ
-            jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
-            C[p.id, it] += model(Qmag, ω) * jacdt * p.ΔΩ
+            C[p.id, it] += acc * p.ΔΩ
         end
     end
     return C
