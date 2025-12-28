@@ -1,24 +1,33 @@
 using LinearAlgebra
 
 """
-Predict a powder-style histogram in (|Q|, ω) by sweeping pixels and TOF bins.
+Predict a powder-style histogram in (|Q|, ω).
 
-- model(Qmag, ω) returns relative intensity (arbitrary units)
-- includes Jacobian dω/dt and pixel solid angle ΔΩ
-- still ignores resolution, efficiency, multiple scattering, etc.
-
-You can pass either:
-- pixels = bank.pixels (all), OR
-- pixels = sample_pixels(bank, ...) (subsample)
+This supports optional *timing-only* resolution:
+- NoResolution(): bin-center evaluation
+- GaussianTimingResolution(σt; order=3|5|7): Gauss–Hermite sampling in TOF
+- GaussianTimingCDFResolution(σt; nsigma=...): TOF-domain CDF/bin-overlap convolution (smear after compute)
 """
 function predict_hist_Qω_powder(inst::Instrument;
     pixels::Vector{DetectorPixel},
     Ei_meV::Float64,
     tof_edges_s::Vector{Float64},
+    model,
     Q_edges::Vector{Float64},
     ω_edges::Vector{Float64},
-    model,
     resolution::AbstractResolutionModel = NoResolution())
+
+    # If using TOF-domain convolution, do detector×TOF once then reduce.
+    if resolution isa GaussianTimingCDFResolution
+        C = predict_pixel_tof(inst;
+            pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+            model=model, resolution=resolution
+        )
+        return reduce_pixel_tof_to_Qω_powder(inst;
+            pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s,
+            C=C, Q_edges=Q_edges, ω_edges=ω_edges
+        )
+    end
 
     H = Hist2D(Q_edges, ω_edges)
 
@@ -28,14 +37,16 @@ function predict_hist_Qω_powder(inst::Instrument;
         for it in 1:length(tof_edges_s)-1
             t0 = tof_edges_s[it]
             t1 = tof_edges_s[it+1]
-            t  = 0.5*(t0 + t1)
+            tc = 0.5*(t0 + t1)
             dt = (t1 - t0)
 
-            δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
-            @inbounds for j in 1:length(δts)
-                tj = t + δts[j]
+            δt, w = time_nodes_weights(resolution, inst, p, Ei_meV, tc)
+
+            for k in eachindex(w)
+                t = tc + δt[k]
+
                 Ef = try
-                    Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                    Ef_from_tof(inst.L1, L2p, Ei_meV, t)
                 catch
                     continue
                 end
@@ -44,25 +55,23 @@ function predict_hist_Qω_powder(inst::Instrument;
                 Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
                 Qmag = norm(Q)
 
-                # expected counts per TOF bin ~ E[ S(Q,ω) * dω ] * ΔΩ
-                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt
-                w = ws[j] * model(Qmag, ω) * jacdt * p.ΔΩ
-
-                deposit_bilinear!(H, Qmag, ω, w)
+                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+                hist_add!(H, Qmag, ω, w[k] * model(Qmag, ω) * jacdt * p.ΔΩ)
             end
         end
     end
-
     return H
 end
 
-"Predict expected counts in detector space: counts[pixel_id, itof]."
-function predict_pixel_tof(inst::Instrument;
+# -----------------------------------------------------------------------------
+# Internal helper: detector×TOF prediction using *bin-center* evaluation only.
+# This is the natural unsmeared input to a TOF-domain CDF convolution.
+# -----------------------------------------------------------------------------
+function _predict_pixel_tof_center(inst::Instrument;
     pixels::Vector{DetectorPixel},
     Ei_meV::Float64,
     tof_edges_s::Vector{Float64},
-    model,
-    resolution::AbstractResolutionModel = NoResolution())
+    model)
 
     n_pix = length(inst.pixels)
     n_tof = length(tof_edges_s) - 1
@@ -76,12 +85,66 @@ function predict_pixel_tof(inst::Instrument;
             t  = 0.5*(t0 + t1)
             dt = t1 - t0
 
-            δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
-            acc = 0.0
-            @inbounds for j in 1:length(δts)
-                tj = t + δts[j]
+            Ef = try
+                Ef_from_tof(inst.L1, L2p, Ei_meV, t)
+            catch
+                continue
+            end
+            (Ef <= 0 || Ef > Ei_meV) && continue
+
+            Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+            Qmag = norm(Q)
+
+            jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+            C[p.id, it] += model(Qmag, ω) * jacdt * p.ΔΩ
+        end
+    end
+
+    return C
+end
+
+"""
+Predict detector×TOF counts (n_pix × n_tof) with optional timing resolution.
+
+Notes:
+- Resolution is applied in TOF space, which keeps the model "instrument-grounded."
+- For CDF resolution, we compute unsmeared counts once and then smear along TOF.
+"""
+function predict_pixel_tof(inst::Instrument;
+    pixels::Vector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::Vector{Float64},
+    model,
+    resolution::AbstractResolutionModel = NoResolution())
+
+    # CDF/bin-overlap timing convolution: compute once then smear in TOF
+    if resolution isa GaussianTimingCDFResolution
+        C = _predict_pixel_tof_center(inst;
+            pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s, model=model
+        )
+        apply_tof_resolution!(C, inst, pixels, Ei_meV, tof_edges_s, resolution)
+        return C
+    end
+
+    n_pix = length(inst.pixels)
+    n_tof = length(tof_edges_s) - 1
+    C = zeros(Float64, n_pix, n_tof)
+
+    for p in pixels
+        L2p = L2(inst, p.id)
+        for it in 1:n_tof
+            t0 = tof_edges_s[it]
+            t1 = tof_edges_s[it+1]
+            tc = 0.5*(t0 + t1)
+            dt = t1 - t0
+
+            δt, w = time_nodes_weights(resolution, inst, p, Ei_meV, tc)
+
+            for k in eachindex(w)
+                t = tc + δt[k]
+
                 Ef = try
-                    Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                    Ef_from_tof(inst.L1, L2p, Ei_meV, t)
                 catch
                     continue
                 end
@@ -90,14 +153,24 @@ function predict_pixel_tof(inst::Instrument;
                 Q, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
                 Qmag = norm(Q)
 
-                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt
-                acc += ws[j] * model(Qmag, ω) * jacdt
+                jacdt = abs(dω_dt(inst.L1, L2p, Ei_meV, t)) * dt
+                C[p.id, it] += w[k] * model(Qmag, ω) * jacdt * p.ΔΩ
             end
-            C[p.id, it] += acc * p.ΔΩ
         end
     end
+
     return C
 end
+
+# Backwards-compatible positional signature (old API)
+predict_pixel_tof(inst::Instrument,
+    pixels::Vector{DetectorPixel},
+    Ei_meV::Float64,
+    tof_edges_s::Vector{Float64},
+    model) = predict_pixel_tof(inst;
+        pixels=pixels, Ei_meV=Ei_meV, tof_edges_s=tof_edges_s, model=model)
+
+
 
 "Vanadium-like normalization in detector space."
 function normalize_by_vanadium(C_sample::AbstractMatrix, C_van::AbstractMatrix; eps=1e-12)

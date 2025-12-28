@@ -1,4 +1,5 @@
 using StaticArrays
+using SpecialFunctions
 
 abstract type AbstractResolutionModel end
 
@@ -74,4 +75,173 @@ end
     w  = SVector(0.0009717812450995192, 0.05451558281912703, 0.4256072526101278, 0.8102646175568073,
                  0.4256072526101278, 0.05451558281912703, 0.0009717812450995192) ./ sqrt(pi)
     return (s2 .* x, w)
+end
+
+# -----------------------------------------------------------------------------
+# CDF-based Gaussian smearing in TOF (bin-overlap convolution)
+# -----------------------------------------------------------------------------
+
+"""
+Timing-only Gaussian resolution applied as a *bin-overlap (CDF) convolution* along TOF.
+
+This avoids "discrete lobes" that can appear for very broad σt when using a low-order
+Gauss–Hermite sampling rule.
+
+Notes:
+- This is a 1D convolution in TOF *per detector pixel*.
+- For speed, we assume σt is constant (Float64). If you pass a callable, we evaluate it
+  once per pixel at a representative time.
+"""
+struct GaussianTimingCDFResolution{T} <: AbstractResolutionModel
+    σt::T          # seconds (Float64) or callable
+    nsigma::Float64
+end
+
+GaussianTimingCDFResolution(σt; nsigma::Float64=4.0) =
+    GaussianTimingCDFResolution{typeof(σt)}(σt, nsigma)
+
+@inline _σt(res::GaussianTimingCDFResolution, inst, p, Ei_meV::Float64, t::Float64) =
+    res.σt isa Function ? res.σt(inst, p, Ei_meV, t) : Float64(res.σt)
+
+# Standard Normal CDF using Base.Math.erf (no extra deps)
+@inline Φ(z::Float64) = 0.5 * (1 + erf(z / sqrt(2.0)))
+
+"""
+Apply TOF-domain resolution to a detector×TOF matrix in-place.
+
+Default: no-op.
+"""
+function apply_tof_resolution!(C::AbstractMatrix{Float64},
+    inst, pixels, Ei_meV::Float64, tof_edges_s::AbstractVector{Float64},
+    res::AbstractResolutionModel)
+    return C
+end
+
+@inline function _is_uniform_edges(tof_edges::AbstractVector{Float64}; rtol=1e-10, atol=0.0)
+    n = length(tof_edges)
+    n < 3 && return true
+    dt = tof_edges[2] - tof_edges[1]
+    @inbounds for i in 2:n-1
+        if abs((tof_edges[i+1] - tof_edges[i]) - dt) > (atol + rtol*abs(dt))
+            return false
+        end
+    end
+    return true
+end
+
+function _smear_row_gaussian_cdf_uniform!(out::AbstractVector{Float64},
+    inp::AbstractVector{Float64}, dt::Float64, σ::Float64, nsigma::Float64)
+
+    fill!(out, 0.0)
+    n = length(inp)
+    if σ <= 0
+        copyto!(out, inp)
+        return out
+    end
+
+    K = Int(ceil(nsigma * σ / dt)) + 1
+    w = Vector{Float64}(undef, 2K+1)
+
+    @inbounds for (idx, k) in enumerate(-K:K)
+        a = ((k - 0.5) * dt) / σ
+        b = ((k + 0.5) * dt) / σ
+        w[idx] = Φ(b) - Φ(a)
+    end
+    s = sum(w)
+    s > 0 && (w ./= s)  # conserve mass under truncation
+
+    @inbounds for i in 1:n
+        xi = inp[i]
+        xi == 0.0 && continue
+        for (idx, k) in enumerate(-K:K)
+            j = i + k
+            (1 <= j <= n) || continue
+            out[j] += xi * w[idx]
+        end
+    end
+    return out
+end
+
+function _smear_row_gaussian_cdf_general!(out::AbstractVector{Float64},
+    inp::AbstractVector{Float64}, tof_edges::AbstractVector{Float64},
+    σ::Float64, nsigma::Float64)
+
+    fill!(out, 0.0)
+    n = length(inp)
+    if σ <= 0
+        copyto!(out, inp)
+        return out
+    end
+
+    tc = Vector{Float64}(undef, n)
+    @inbounds for i in 1:n
+        tc[i] = 0.5*(tof_edges[i] + tof_edges[i+1])
+    end
+
+    @inbounds for i in 1:n
+        xi = inp[i]
+        xi == 0.0 && continue
+        tci = tc[i]
+
+        tmin = tci - nsigma*σ
+        tmax = tci + nsigma*σ
+
+        jlo = 1
+        while jlo <= n && tof_edges[jlo+1] < tmin
+            jlo += 1
+        end
+        jhi = n
+        while jhi >= 1 && tof_edges[jhi] > tmax
+            jhi -= 1
+        end
+        jlo > jhi && continue
+
+        sw = 0.0
+        wtmp = Vector{Float64}(undef, jhi-jlo+1)
+        for (k, j) in enumerate(jlo:jhi)
+            a = (tof_edges[j]   - tci) / σ
+            b = (tof_edges[j+1] - tci) / σ
+            wj = Φ(b) - Φ(a)
+            wtmp[k] = wj
+            sw += wj
+        end
+        sw <= 0 && continue
+        for (k, j) in enumerate(jlo:jhi)
+            out[j] += xi * (wtmp[k] / sw)
+        end
+    end
+
+    return out
+end
+
+"""
+Apply CDF-based Gaussian timing resolution in-place.
+
+We evaluate σt once per pixel at a representative time (midpoint of TOF window).
+"""
+function apply_tof_resolution!(C::AbstractMatrix{Float64},
+    inst, pixels, Ei_meV::Float64, tof_edges_s::AbstractVector{Float64},
+    res::GaussianTimingCDFResolution)
+
+    n_tof = size(C, 2)
+    (length(tof_edges_s) == n_tof + 1) || throw(ArgumentError("tof_edges_s length must be n_tof+1"))
+
+    uniform = _is_uniform_edges(tof_edges_s)
+    dt = uniform ? (tof_edges_s[2] - tof_edges_s[1]) : NaN
+    t_rep = 0.5*(tof_edges_s[1] + tof_edges_s[end])
+
+    tmp = Vector{Float64}(undef, n_tof)
+
+    @inbounds for p in pixels
+        σ = _σt(res, inst, p, Ei_meV, t_rep)
+        row = view(C, p.id, :)
+        if uniform
+            _smear_row_gaussian_cdf_uniform!(tmp, row, dt, σ, res.nsigma)
+        else
+            _smear_row_gaussian_cdf_general!(tmp, row, tof_edges_s, σ, res.nsigma)
+        end
+        copyto!(row, tmp)
+    end
+
+    return C
 end
