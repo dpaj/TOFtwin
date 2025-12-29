@@ -1,19 +1,42 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
+
 using Revise
 using TOFtwin
 
-# NOTE: SEQUOIA has ~120k pixels; plotting all of them is slow.
-# Default strides downsample for visualization.
+# NOTE: SEQUOIA has ~120k pixels; plotting all of them can be slow.
+# For interactive work, ψstride/ηstride = 2..4 is often nicer.
 CFG = Dict(
-    :backend    => :gl,        # :gl or :cairo
-    :idf_src    => :SEQUOIA,   # :SEQUOIA or an explicit path
-    :bank_regex => nothing,    # e.g. r"A_row" to focus
-    :ψstride    => 1,
-    :ηstride    => 1,
-    :cached     => true,       # set false once if you want to bypass disk cache
-    :out_path   => "out/view_detector_sequoia.png",
-    :save       => true,
+    :backend   => :gl,
+    :idf_src   => :SEQUOIA,
+
+    :views     => (:xz, :xyz),
+    :layout    => :h,
+
+    :title     => "SEQUOIA from IDF",
+    :bank_regex=> nothing,
+
+    :ψstride   => 2,   # <-- recommended default for interactivity
+    :ηstride   => 2,
+
+    :cached    => true,
+    :rebuild   => false,
+
+    :xz_y_toward_viewer => true,
+
+    :camera        => :ki,
+    :cam_ki        => (0, 0, 1),
+    :cam_up        => (0, 1, 0),
+    :cam_dist      => nothing,
+    :cam_side_frac => 0.18,
+    :cam_up_frac   => 0.10,
+
+    :fig_size  => (1500, 750),
+    :ms_2d     => 1.2,
+    :ms_3d     => 1.2,
+
+    :out_path  => "out/view_detector_sequoia_views.png",
+    :save      => true,
 )
 
 if CFG[:backend] == :cairo
@@ -22,53 +45,7 @@ else
     using GLMakie
 end
 
-function view_sequoia(; cfg=CFG)
-    out = TOFtwin.load_instrument_idf(cfg[:idf_src]; cached=cfg[:cached])
-    inst   = out.inst
-    r_samp = inst.r_samp_L
-    pixels = hasproperty(inst, :pixels) ? inst.pixels : out.pixels
+include(joinpath(@__DIR__, "view_detector_idf_common.jl"))
 
-    cloud = TOFtwin.detector_cloud(pixels;
-        r_samp=r_samp,
-        bank_regex=cfg[:bank_regex],
-        ψstride=cfg[:ψstride],
-        ηstride=cfg[:ηstride],
-    )
-
-    fig = Figure(size=(1100, 850))
-    ax  = Axis3(fig[1,1], aspect=:data, xlabel="x (m)", ylabel="y (m)", zlabel="z (m)",
-                title="SEQUOIA from IDF (N=$(length(cloud.pixels_used)))")
-
-    scatter!(ax, [r_samp[1]], [r_samp[2]], [r_samp[3]], markersize=18)
-
-    ms = 2.5
-    scatter!(ax, cloud.xs[cloud.idxL], cloud.ys[cloud.idxL], cloud.zs[cloud.idxL];
-             markersize=ms, marker=:circle, label="x < x_sample")
-    scatter!(ax, cloud.xs[cloud.idxR], cloud.ys[cloud.idxR], cloud.zs[cloud.idxR];
-             markersize=ms, marker=:rect, label="x ≥ x_sample")
-
-    # beam (+z)
-    lines!(ax, [r_samp[1], r_samp[1]],
-              [r_samp[2], r_samp[2]],
-              [r_samp[3], r_samp[3] + max(4.0, 1.2*cloud.ringR)])
-
-    # ring at y = sample y
-    θ = range(-pi, pi; length=361)
-    ringx = r_samp[1] .+ cloud.ringR .* sin.(θ)
-    ringy = r_samp[2] .+ 0.0 .* θ
-    ringz = r_samp[3] .+ cloud.ringR .* cos.(θ)
-    lines!(ax, ringx, ringy, ringz)
-
-    axislegend(ax)
-
-    if cfg[:save]
-        mkpath("out")
-        save(cfg[:out_path], fig)
-        @info "Wrote $(cfg[:out_path])"
-    end
-
-    return fig
-end
-
-fig = view_sequoia()
+fig = view_detector_idf(; cfg=CFG)
 display(fig)

@@ -4,18 +4,38 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 using TOFtwin
 
-# Simple detector-view script for CNCS Mantid IDF.
-# Produces a 2D X–Z projection (lab frame) and saves a PNG.
-
 CFG = Dict(
-    :backend    => :gl,   # :gl or :cairo
-    :idf_path   => joinpath(@__DIR__, "CNCS_Definition_2025B.xml"),
-    :bank_regex => nothing,  # e.g. r"bank29" to focus
-    :ψstride    => 1,
-    :ηstride    => 1,
-    :out_path   => "out/view_detector_cncs.png",
-    :save       => true,
-    :rebuild    => false,
+    :backend   => :gl,   # :gl (interactive) or :cairo (static)
+    :idf_src   => joinpath(@__DIR__, "CNCS_Definition_2025B.xml"),
+
+    :views     => (:xz, :xyz),
+    :layout    => :h,    # :h (side-by-side) or :v (stacked)
+
+    :title     => "CNCS from IDF",
+    :bank_regex=> nothing,
+    :ψstride   => 1,
+    :ηstride   => 1,
+
+    :cached    => true,
+    :rebuild   => false,
+
+    # XZ handedness (set true if you want +y toward the viewer)
+    :xz_y_toward_viewer => true,
+
+    # Camera controls (only affects :xyz)
+    :camera        => :ki,        # :ki or :default (skip)
+    :cam_ki        => (0, 0, 1),   # +z (forward)
+    :cam_up        => (0, 1, 0),   # +y up
+    :cam_dist      => nothing,     # set Float64 to override
+    :cam_side_frac => 0.22,
+    :cam_up_frac   => 0.12,
+
+    :fig_size  => (1500, 750),
+    :ms_2d     => 2.0,
+    :ms_3d     => 2.0,
+
+    :out_path  => "out/view_detector_cncs_views.png",
+    :save      => true,
 )
 
 if CFG[:backend] == :cairo
@@ -24,40 +44,7 @@ else
     using GLMakie
 end
 
-function view_cncs(; cfg=CFG)
-    out = TOFtwin.detector_cloud_from_idf(cfg[:idf_path];
-        bank_regex = cfg[:bank_regex],
-        ψstride    = cfg[:ψstride],
-        ηstride    = cfg[:ηstride],
-        cached     = true,
-        rebuild    = cfg[:rebuild],
-    )
+include(joinpath(@__DIR__, "view_detector_idf_common.jl"))
 
-    cloud = out.cloud
-
-    fig = Figure(size=(1000, 650))
-    ax  = Axis(fig[1,1];
-        xlabel = "x (m)",
-        ylabel = "z (m)",
-        title  = "CNCS detector coverage (X–Z projection)",
-    )
-
-    scatter!(ax, cloud.xs[cloud.idxL], cloud.zs[cloud.idxL], markersize=2, label="x < x_samp")
-    scatter!(ax, cloud.xs[cloud.idxR], cloud.zs[cloud.idxR], markersize=2, label="x ≥ x_samp")
-
-    axislegend(ax; position=:rb)
-
-    n_used = length(cloud.xs)
-    Label(fig[2,1], "pixels used = $n_used   (ψstride=$(cfg[:ψstride]), ηstride=$(cfg[:ηstride]))"; tellwidth=false)
-
-    if cfg[:save]
-        mkpath(dirname(cfg[:out_path]))
-        save(cfg[:out_path], fig)
-        @info "Wrote $(cfg[:out_path])"
-    end
-
-    return fig
-end
-
-fig = view_cncs()
+fig = view_detector_idf(; cfg=CFG)
 display(fig)
