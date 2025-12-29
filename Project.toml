@@ -1,7 +1,7 @@
 name = "TOFtwin"
 uuid = "fb4c2347-ef67-4041-8618-d5a4cc5ca4d8"
-authors = ["Daniel Pajerowski <daniel@pajerowski.com>"]
 version = "1.0.0-DEV"
+authors = ["Daniel Pajerowski <daniel@pajerowski.com>"]
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
@@ -19,6 +19,7 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Sunny = "2b4a2ac8-8f8b-43e8-abf4-3cb0c45e8736"
 
 [compat]
 CairoMakie = "0.15.8"
@@ -36,6 +37,7 @@ Serialization = "1.11.0"
 SpecialFunctions = "2.6.1"
 StaticArrays = "1.9.15"
 Statistics = "1.11.1"
+Sunny = "0.8.1"
 julia = "1.10.10"
 
 [extras]
