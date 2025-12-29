@@ -82,3 +82,39 @@ function dω_dt(L1::Float64, L2::Float64, Ei::Float64, t::Float64)
     # ω = Ei - Ef  => dω/dt = -dEf/dt = 2 Ef / τ
     return 2.0 * Ef / τ
 end
+
+"""
+Approximate derivative d|Q|/dt (Å⁻¹/s) at fixed pixel direction.
+
+This captures *timing-only* broadening of |Q| (via changing k_f magnitude) for a fixed pixel.
+It does NOT include angular broadening (beam divergence, pixel size, mosaic, etc.).
+
+Implementation: finite difference in total TOF t, using Ef_from_tof + Qω_from_pixel.
+"""
+function dQmag_dt(L1::Float64, L2::Float64, r_pix_L::SVector{3,Float64}, Ei::Float64, t::Float64;
+                  r_samp_L::SVector{3,Float64}=SVector{3,Float64}(0.0,0.0,0.0),
+                  ε::Float64=1e-7)
+
+    ε = abs(ε)
+    ε == 0 && throw(ArgumentError("ε must be nonzero"))
+    vi = v_from_EmeV(Ei)
+    t0 = L1 / vi
+
+    Qmag_at(tp) = begin
+        Ef = Ef_from_tof(L1, L2, Ei, tp)
+        Q, _ = Qω_from_pixel(r_pix_L, Ei, Ef; r_samp_L=r_samp_L)
+        return norm(Q)
+    end
+
+    tp = t + ε
+    tm = t - ε
+
+    # Use central difference when possible; otherwise fall back to forward difference.
+    if tm > t0
+        return (Qmag_at(tp) - Qmag_at(tm)) / (2ε)
+    else
+        t > t0 || throw(ArgumentError("t must be > L1/vi (got t=$(t), L1/vi=$(t0))"))
+        return (Qmag_at(tp) - Qmag_at(t)) / ε
+    end
+end
+

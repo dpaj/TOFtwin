@@ -129,6 +129,117 @@ end
     return true
 end
 
+
+# -----------------------------------------------------------------------------
+# Precomputed work for GaussianTimingCDFResolution (optional, for fast sweeps)
+# -----------------------------------------------------------------------------
+
+abstract type AbstractCDFSmearWork end
+
+"Uniform TOF bins, shared kernel for all pixels (constant σt)."
+struct CDFSmearUniformShared <: AbstractCDFSmearWork
+    dt::Float64
+    nsigma::Float64
+    K::Int32
+    w::Vector{Float64}     # length = 2K+1, normalized
+end
+
+"Uniform TOF bins, per-pixel kernels (σt callable evaluated once per pixel)."
+struct CDFSmearUniformPerPixel <: AbstractCDFSmearWork
+    dt::Float64
+    nsigma::Float64
+    K::Vector{Int32}              # length = n_used_pixels
+    w::Vector{Vector{Float64}}    # per-pixel kernel, normalized
+end
+
+"Non-uniform TOF bins: cache bin centers to avoid per-call allocations."
+struct CDFSmearGeneral <: AbstractCDFSmearWork
+    nsigma::Float64
+    tc::Vector{Float64}           # bin centers, length n_tof
+end
+
+"Build the normalized CDF overlap kernel for uniform bin width dt."
+function _gaussian_cdf_uniform_kernel(dt::Float64, σ::Float64, nsigma::Float64)
+    if σ <= 0
+        return (0, [1.0])
+    end
+    K = Int(ceil(nsigma * σ / dt)) + 1
+    w = Vector{Float64}(undef, 2K+1)
+    @inbounds for (idx, k) in enumerate(-K:K)
+        a = ((k - 0.5) * dt) / σ
+        b = ((k + 0.5) * dt) / σ
+        w[idx] = Φ(b) - Φ(a)
+    end
+    s = sum(w)
+    s > 0 && (w ./= s)
+    return (K, w)
+end
+
+"Fast uniform-bin smear using precomputed kernel (w,K)."
+function _smear_row_gaussian_cdf_uniform_precomputed!(out::AbstractVector{Float64},
+    inp::AbstractVector{Float64}, w::AbstractVector{Float64}, K::Int)
+
+    fill!(out, 0.0)
+    n = length(inp)
+    @inbounds for i in 1:n
+        xi = inp[i]
+        xi == 0.0 && continue
+        for k in -K:K
+            j = i + k
+            (1 <= j <= n) || continue
+            out[j] += xi * w[k + K + 1]
+        end
+    end
+    return out
+end
+
+
+"""
+Precompute model-independent work for GaussianTimingCDFResolution smearing.
+
+This is intended for fast sweeps over many models at fixed (instrument, pixels, Ei, tof_edges, resolution).
+"""
+function precompute_tof_smear_work(inst, pixels, Ei_meV::Float64,
+    tof_edges_s::AbstractVector{Float64},
+    res::GaussianTimingCDFResolution)
+
+    n_tof = length(tof_edges_s) - 1
+    (length(tof_edges_s) == n_tof + 1) || throw(ArgumentError("tof_edges_s length must be n_tof+1"))
+
+    uniform = _is_uniform_edges(tof_edges_s)
+    t_rep = 0.5*(tof_edges_s[1] + tof_edges_s[end])
+
+    if uniform
+        dt = tof_edges_s[2] - tof_edges_s[1]
+
+        # If σt is constant, we can share a single kernel across all pixels.
+        if !(res.σt isa Function)
+            σ = Float64(res.σt)
+            K, w = _gaussian_cdf_uniform_kernel(dt, σ, res.nsigma)
+            return CDFSmearUniformShared(dt, res.nsigma, Int32(K), w)
+        end
+
+        # Otherwise, precompute one kernel per pixel (σt evaluated once at t_rep).
+        n_used = length(pixels)
+        Ks = Vector{Int32}(undef, n_used)
+        ws = Vector{Vector{Float64}}(undef, n_used)
+        @inbounds for (i, p) in pairs(pixels)
+            σ = _σt(res, inst, p, Ei_meV, t_rep)
+            K, w = _gaussian_cdf_uniform_kernel(dt, σ, res.nsigma)
+            Ks[i] = Int32(K)
+            ws[i] = w
+        end
+        return CDFSmearUniformPerPixel(dt, res.nsigma, Ks, ws)
+    end
+
+    # Non-uniform TOF bins: cache bin centers (tc).
+    tc = Vector{Float64}(undef, n_tof)
+    @inbounds for i in 1:n_tof
+        tc[i] = 0.5*(tof_edges_s[i] + tof_edges_s[i+1])
+    end
+    return CDFSmearGeneral(res.nsigma, tc)
+end
+
 function _smear_row_gaussian_cdf_uniform!(out::AbstractVector{Float64},
     inp::AbstractVector{Float64}, dt::Float64, σ::Float64, nsigma::Float64)
 
@@ -162,20 +273,28 @@ function _smear_row_gaussian_cdf_uniform!(out::AbstractVector{Float64},
     return out
 end
 
+
 function _smear_row_gaussian_cdf_general!(out::AbstractVector{Float64},
     inp::AbstractVector{Float64}, tof_edges::AbstractVector{Float64},
     σ::Float64, nsigma::Float64)
+
+    n = length(inp)
+    tc = Vector{Float64}(undef, n)
+    @inbounds for i in 1:n
+        tc[i] = 0.5*(tof_edges[i] + tof_edges[i+1])
+    end
+    return _smear_row_gaussian_cdf_general!(out, inp, tof_edges, tc, σ, nsigma)
+end
+
+function _smear_row_gaussian_cdf_general!(out::AbstractVector{Float64},
+    inp::AbstractVector{Float64}, tof_edges::AbstractVector{Float64},
+    tc::AbstractVector{Float64}, σ::Float64, nsigma::Float64)
 
     fill!(out, 0.0)
     n = length(inp)
     if σ <= 0
         copyto!(out, inp)
         return out
-    end
-
-    tc = Vector{Float64}(undef, n)
-    @inbounds for i in 1:n
-        tc[i] = 0.5*(tof_edges[i] + tof_edges[i+1])
     end
 
     @inbounds for i in 1:n
@@ -197,51 +316,82 @@ function _smear_row_gaussian_cdf_general!(out::AbstractVector{Float64},
         jlo > jhi && continue
 
         sw = 0.0
-        wtmp = Vector{Float64}(undef, jhi-jlo+1)
-        for (k, j) in enumerate(jlo:jhi)
+        for j in jlo:jhi
             a = (tof_edges[j]   - tci) / σ
             b = (tof_edges[j+1] - tci) / σ
-            wj = Φ(b) - Φ(a)
-            wtmp[k] = wj
-            sw += wj
+            sw += (Φ(b) - Φ(a))
         end
         sw <= 0 && continue
-        for (k, j) in enumerate(jlo:jhi)
-            out[j] += xi * (wtmp[k] / sw)
+
+        scale = xi / sw
+        for j in jlo:jhi
+            a = (tof_edges[j]   - tci) / σ
+            b = (tof_edges[j+1] - tci) / σ
+            out[j] += scale * (Φ(b) - Φ(a))
         end
     end
 
     return out
 end
 
+
 """
 Apply CDF-based Gaussian timing resolution in-place.
 
 We evaluate σt once per pixel at a representative time (midpoint of TOF window).
 """
+
+"""
+Apply CDF-based Gaussian timing resolution in-place.
+
+If `work` is provided (from `precompute_tof_smear_work`), the smearing step avoids
+recomputing the overlap kernel and allocations, which is ideal for sweeping many models.
+
+We evaluate σt once per pixel at a representative time (midpoint of TOF window).
+"""
 function apply_tof_resolution!(C::AbstractMatrix{Float64},
     inst, pixels, Ei_meV::Float64, tof_edges_s::AbstractVector{Float64},
-    res::GaussianTimingCDFResolution)
+    res::GaussianTimingCDFResolution;
+    work::Union{Nothing,AbstractCDFSmearWork}=nothing)
 
     n_tof = size(C, 2)
     (length(tof_edges_s) == n_tof + 1) || throw(ArgumentError("tof_edges_s length must be n_tof+1"))
 
-    uniform = _is_uniform_edges(tof_edges_s)
-    dt = uniform ? (tof_edges_s[2] - tof_edges_s[1]) : NaN
-    t_rep = 0.5*(tof_edges_s[1] + tof_edges_s[end])
+    # Build work on demand (keeps backward compatibility and speeds up constant-σt case).
+    work === nothing && (work = precompute_tof_smear_work(inst, pixels, Ei_meV, tof_edges_s, res))
 
     tmp = Vector{Float64}(undef, n_tof)
 
-    @inbounds for p in pixels
-        σ = _σt(res, inst, p, Ei_meV, t_rep)
-        row = view(C, p.id, :)
-        if uniform
-            _smear_row_gaussian_cdf_uniform!(tmp, row, dt, σ, res.nsigma)
-        else
-            _smear_row_gaussian_cdf_general!(tmp, row, tof_edges_s, σ, res.nsigma)
+    if work isa CDFSmearUniformShared
+        K = Int(work.K)
+        w = work.w
+        @inbounds for p in pixels
+            row = view(C, p.id, :)
+            _smear_row_gaussian_cdf_uniform_precomputed!(tmp, row, w, K)
+            copyto!(row, tmp)
         end
-        copyto!(row, tmp)
+        return C
     end
 
-    return C
+    if work isa CDFSmearUniformPerPixel
+        @inbounds for (i, p) in pairs(pixels)
+            row = view(C, p.id, :)
+            _smear_row_gaussian_cdf_uniform_precomputed!(tmp, row, work.w[i], Int(work.K[i]))
+            copyto!(row, tmp)
+        end
+        return C
+    end
+
+    if work isa CDFSmearGeneral
+        t_rep = 0.5*(tof_edges_s[1] + tof_edges_s[end])
+        @inbounds for p in pixels
+            σ = _σt(res, inst, p, Ei_meV, t_rep)
+            row = view(C, p.id, :)
+            _smear_row_gaussian_cdf_general!(tmp, row, tof_edges_s, work.tc, σ, res.nsigma)
+            copyto!(row, tmp)
+        end
+        return C
+    end
+
+    throw(ArgumentError("Unknown CDF smear work type: $(typeof(work))"))
 end
