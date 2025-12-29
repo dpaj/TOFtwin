@@ -89,7 +89,7 @@ atexit(print_profile_summary)
 # Output knobs
 # -----------------------------
 do_hist      = lowercase(get(ENV, "TOFTWIN_DO_HIST", "1")) in ("1","true","yes")
-plot_kernel  = lowercase(get(ENV, "TOFTWIN_PLOT_KERNEL", "0")) in ("1","true","yes")
+plot_kernel  = lowercase(get(ENV, "TOFTWIN_PLOT_KERNEL", "1")) in ("1","true","yes")
 do_save      = lowercase(get(ENV, "TOFTWIN_SAVE", "1")) in ("1","true","yes")
 outdir       = get(ENV, "TOFTWIN_OUTDIR", joinpath(@__DIR__, "out"))
 do_save && mkpath(outdir)
@@ -242,10 +242,10 @@ res_mode = lowercase(get(ENV, "TOFTWIN_RES_MODE", "cdf"))  # none | gh | cdf
 
 # NTOF selection
 ntof_env = lowercase(get(ENV, "TOFTWIN_NTOF", "auto"))
-α = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "0.5"))
-β = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "0.333333333333"))
+α = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "2.0"))
+β = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "1.0"))
 ntof_min = parse(Int, get(ENV, "TOFTWIN_NTOF_MIN", "200"))
-ntof_max = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "2000"))
+ntof_max = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "1000"))
 ntof = (ntof_env in ("auto","suggest","0")) ? 0 : parse(Int, ntof_env)
 
 gh_order = parse(Int, get(ENV, "TOFTWIN_GH_ORDER", "3"))
