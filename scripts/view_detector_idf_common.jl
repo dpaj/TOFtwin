@@ -33,7 +33,6 @@ function _default_ki_camera(r_samp, ringR;
     ki=(0,0,1), up=(0,1,0), dist=nothing,
     side_frac=0.22, up_frac=0.12,
 )
-    # Work in Float32; Makie likes Float32 camera vectors/points.
     ki_v = _Vec3fT(Float32(ki[1]), Float32(ki[2]), Float32(ki[3]))
     up_v = _Vec3fT(Float32(up[1]), Float32(up[2]), Float32(up[3]))
 
@@ -42,11 +41,9 @@ function _default_ki_camera(r_samp, ringR;
     ki_n = ki_v / max(eps(Float32), norm(ki_v))
     up_n = up_v / max(eps(Float32), norm(up_v))
 
-    # Right-handed basis: right = ki × up
     right = cross(ki_n, up_n)
     nr = norm(right)
     if nr < 1f-6
-        # If up is nearly collinear with ki, pick a fallback up.
         up_n = _Vec3fT(0f0, 1f0, 0f0)
         right = cross(ki_n, up_n)
         nr = norm(right)
@@ -58,34 +55,27 @@ function _default_ki_camera(r_samp, ringR;
     end
     right_n = right / max(1f-6, nr)
 
-    # Make an orthonormal up consistent with ki/right
     up2 = cross(right_n, ki_n)
     up2_n = up2 / max(1f-6, norm(up2))
 
     d = dist === nothing ? Float32(max(4.0, 1.6 * ringR)) : Float32(dist)
 
-    # Eye: behind the sample along -ki, with small side/up offsets
     eye = look - d * ki_n + (side_frac * d) * right_n + (up_frac * d) * up2_n
-
     return eye, look, up2_n
 end
 
-"""Set a free camera on a Scene (from LScene)."""
 function _set_scene_camera!(scene, eye, lookat, up)
-    # Ensure a 3D camera exists
     try
         Makie.cam3d_cad!(scene)
     catch
         try Makie.cam3d!(scene) catch end
     end
 
-    # Prevent auto-recentering from fighting us (if available)
     try
         camc = Makie.cameracontrols(scene)
         if hasproperty(camc, :center)
             camc.center[] = false
         end
-        # Prefer signature with cam controls
         try
             Makie.update_cam!(scene, camc, eye, lookat, up)
             return
@@ -102,32 +92,6 @@ end
 # Main viewer
 # -----------------------
 
-"""
-Unified detector viewer.
-
-Required cfg keys (one of):
-- :idf_src  (Symbol like :SEQUOIA or String path to an IDF)
-- :idf_path (legacy alias for :idf_src)
-
-Optional cfg keys:
-- :views   => (:xz, :xyz) by default. Any subset of (:xz, :xyz, :xy, :yz)
-- :layout  => :h (default) or :v
-- :title   => String
-- :bank_regex, :ψstride, :ηstride, :cached, :rebuild
-- :fig_size, :ms_2d, :ms_3d
-
-XZ handedness:
-- :xz_y_toward_viewer => Bool (default false). If true, flips x-axis in XZ so +y is out-of-page.
-
-Camera cfg (applies when :xyz in :views):
-- :camera  => :ki (default) or :default (skip)
-- :cam_ki  => (0,0,1)
-- :cam_up  => (0,1,0)
-- :cam_dist, :cam_side_frac, :cam_up_frac
-
-Saving:
-- :save, :out_path
-"""
 function view_detector_idf(; cfg::Dict)
     idf_src = _getany(cfg, (:idf_src, :idf_path), nothing)
     idf_src === nothing && error("cfg must include :idf_src (or legacy :idf_path)")
@@ -135,7 +99,6 @@ function view_detector_idf(; cfg::Dict)
     cached  = get(cfg, :cached, true)
     rebuild = get(cfg, :rebuild, false)
 
-    # Load instrument (tolerate old/new load_instrument_idf kw set)
     function _load()
         try
             return TOFtwin.load_instrument_idf(idf_src; cached=cached, rebuild=rebuild)
@@ -147,7 +110,25 @@ function view_detector_idf(; cfg::Dict)
     out    = _load()
     inst   = out.inst
     r_samp = inst.r_samp_L
-    pixels = hasproperty(inst, :pixels) ? inst.pixels : out.pixels
+    pixels0 = hasproperty(inst, :pixels) ? inst.pixels : out.pixels
+
+    grouping      = get(cfg, :grouping, "")
+    grouping_file = get(cfg, :grouping_file, nothing)
+    mask_btp      = get(cfg, :mask_btp, "")
+    mask_mode     = get(cfg, :mask_mode, :drop)
+    outdir        = get(cfg, :outdir, "out")
+    angle_step    = get(cfg, :powder_angle_step, 0.5)
+
+    pixels = TOFtwin.apply_grouping_masking(pixels0;
+        instrument=inst.name,
+        grouping=grouping,
+        grouping_file=grouping_file,
+        mask_btp=mask_btp,
+        mask_mode=mask_mode,
+        outdir=outdir,
+        angle_step=angle_step,
+        return_meta=false,
+    )
 
     cloud = TOFtwin.detector_cloud(pixels;
         r_samp     = r_samp,
@@ -167,11 +148,9 @@ function view_detector_idf(; cfg::Dict)
 
     fig = Figure(size=figsize)
 
-    # Layout slots
     n = length(views)
     slot(i) = (layout == :v) ? fig[i, 1] : fig[1, i]
 
-    # Keep reference to 3D scene if created (for camera init)
     scene3 = nothing
 
     for (i, v) in enumerate(views)
@@ -188,11 +167,9 @@ function view_detector_idf(; cfg::Dict)
             scatter!(ax, cloud.xs[cloud.idxR], cloud.zs[cloud.idxR]; markersize=ms2d, marker=:rect,   label="x ≥ x_samp")
             axislegend(ax; position=:rb)
 
-            # beam (+z)
             zmax = r_samp[3] + max(4.0, 1.2 * cloud.ringR)
             lines!(ax, [r_samp[1], r_samp[1]], [r_samp[3], zmax])
 
-            # ring in XZ
             θ = range(-pi, pi; length=361)
             ringx = r_samp[1] .+ cloud.ringR .* sin.(θ)
             ringz = r_samp[3] .+ cloud.ringR .* cos.(θ)
@@ -221,13 +198,12 @@ function view_detector_idf(; cfg::Dict)
             axislegend(ax; position=:rb)
 
         elseif v == :xyz
-            # 3×1 sublayout: title, big 3D scene, legend below
             sub = GridLayout(3, 1)
             slot(i)[] = sub
 
-            rowsize!(sub, 1, Auto())         # title
-            rowsize!(sub, 2, Relative(1))    # scene gets the bulk
-            rowsize!(sub, 3, Auto())         # legend
+            rowsize!(sub, 1, Auto())
+            rowsize!(sub, 2, Relative(1))
+            rowsize!(sub, 3, Auto())
 
             Label(sub[1, 1], "$title_base — 3D (N=$n_used)"; tellwidth=false)
 
@@ -241,13 +217,11 @@ function view_detector_idf(; cfg::Dict)
             pR = scatter!(lsc, cloud.xs[cloud.idxR], cloud.ys[cloud.idxR], cloud.zs[cloud.idxR];
                 markersize=ms3d, marker=:rect)
 
-            # beam (+z)
             zmax = r_samp[3] + max(4.0, 1.2 * cloud.ringR)
             lines!(lsc, [r_samp[1], r_samp[1]],
                     [r_samp[2], r_samp[2]],
                     [r_samp[3], zmax])
 
-            # ring at y = sample y
             θ = range(-pi, pi; length=361)
             ringx = r_samp[1] .+ cloud.ringR .* sin.(θ)
             ringy = r_samp[2] .+ 0.0 .* θ
@@ -260,7 +234,6 @@ function view_detector_idf(; cfg::Dict)
         end
     end
 
-    # Footer label
     footer = "pixels used = $n_used   (ψstride=$(get(cfg,:ψstride,1)), ηstride=$(get(cfg,:ηstride,1)))"
     if layout == :v
         Label(fig[n+1, 1], footer; tellwidth=false)
@@ -268,7 +241,6 @@ function view_detector_idf(; cfg::Dict)
         Label(fig[2, 1:n], footer; tellwidth=false)
     end
 
-    # Camera init (set once, after all plots added)
     if scene3 !== nothing && get(cfg, :camera, :ki) != :default
         ki = get(cfg, :cam_ki, (0,0,1))
         up = get(cfg, :cam_up, (0,1,0))

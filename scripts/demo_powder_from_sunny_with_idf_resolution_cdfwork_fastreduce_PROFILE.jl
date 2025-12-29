@@ -1,4 +1,3 @@
-
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
@@ -15,9 +14,15 @@ using SHA
 # Extra env vars:
 #   TOFTWIN_PROFILE=1                 (default 1) print per-step timings + summary
 #   TOFTWIN_PROFILE_SORT=time|bytes   (default time)
+#
+# NEW grouping/masking env vars:
+#   TOFTWIN_GROUPING=""|"2x1"|"4x1"|"8x1"|"4x2"|"8x2"|"powder"
+#   TOFTWIN_GROUPING_FILE=""          (optional explicit xml path override)
+#   TOFTWIN_MASK_BTP=""              (e.g. "Bank=40-50;Mode=drop" or "DetectorList=123,124")
+#   TOFTWIN_MASK_MODE=drop|zeroΩ     (used if spec omits Mode)
+#   TOFTWIN_POWDER_ANGLESTEP=0.5
 # -----------------------------------------------------------------------------
 
-# Backend selection
 backend = lowercase(get(ENV, "TOFTWIN_BACKEND", "gl"))
 if backend == "gl"
     using GLMakie
@@ -48,7 +53,7 @@ function step(name::AbstractString, f::Function)
         time_s=Float64(t.time),
         gctime_s=Float64(t.gctime),
         bytes=Int64(t.bytes),
-        allocs=Int64(0),  # placeholder; Julia versions differ on allocation-count reporting
+        allocs=Int64(0),
     ))
     @info "STEP" name=name time_s=round(t.time, digits=3) gctime_s=round(t.gctime, digits=3) bytes=pretty_bytes(t.bytes)
     return t.value
@@ -116,7 +121,6 @@ function load_sunny_powder_jld2(path::AbstractString; outside=0.0)
 
     @info "Loaded Sunny table: size(S)=$(size(S)), len(Q)=$(length(Q)), len(ω)=$(length(W))"
 
-    # Sunny often stores as (ω, Q). Fix to (Q, ω).
     if size(S) == (length(W), length(Q))
         @info "Transposing Sunny table (ω,Q) -> (Q,ω)"
         S = permutedims(S)
@@ -200,8 +204,35 @@ out = step("load instrument from IDF", () -> begin
 end)
 
 inst = out.inst
-bank = (hasproperty(out, :bank) && out.bank !== nothing) ? out.bank : TOFtwin.DetectorBank(inst.name, out.pixels)
+bank0 = (hasproperty(out, :bank) && out.bank !== nothing) ? out.bank : TOFtwin.DetectorBank(inst.name, out.pixels)
 
+# -----------------------------
+# NEW: grouping/masking (speed-first)
+# -----------------------------
+grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "8x2"))
+grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
+mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")
+mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
+angle_step    = parse(Float64, get(ENV, "TOFTWIN_POWDER_ANGLESTEP", "0.5"))
+
+pixels_gm = step("apply grouping/masking", () -> begin
+    TOFtwin.apply_grouping_masking(bank0.pixels;
+        instrument=instr,
+        grouping=grouping,
+        grouping_file=isempty(grouping_file) ? nothing : grouping_file,
+        mask_btp=mask_btp,
+        mask_mode=mask_mode,
+        outdir=outdir,
+        angle_step=angle_step,
+        return_meta=false,
+    )
+end)
+
+bank = TOFtwin.DetectorBank(inst.name, pixels_gm)
+
+# -----------------------------
+# Pixel selection (optional extra stride decimation)
+# -----------------------------
 default_stride = instr === :SEQUOIA ? "1" : "1"
 ψstride = parse(Int, get(ENV, "TOFTWIN_PSI_STRIDE", default_stride))
 ηstride = parse(Int, get(ENV, "TOFTWIN_ETA_STRIDE", default_stride))
@@ -210,7 +241,8 @@ pix_used = step("select pixels (AngularDecimate)", () -> sample_pixels(bank, Ang
 
 @info "Instrument = $instr"
 @info "IDF: $idf_path"
-@info "pixels used = $(length(pix_used)) (of $(length(bank.pixels)))  stride=(ψ=$ψstride, η=$ηstride)"
+@info "pixels used = $(length(pix_used)) (of $(length(bank0.pixels)))  after_groupmask=$(length(bank.pixels))  stride=(ψ=$ψstride, η=$ηstride)"
+@info "grouping='$grouping' grouping_file='$(grouping_file)'  mask='$(isempty(strip(mask_btp)) ? "" : "ON")'"
 
 # -----------------------------
 # Axes / TOF
@@ -229,7 +261,6 @@ Q_edges, ω_edges = step("build Q,ω axes", () -> begin
     return (Qe, ωe)
 end)
 
-# TOF window (rough)
 L2min = minimum(inst.L2)
 L2max = maximum(inst.L2)
 Ef_min, Ef_max = 1.0, Ei
@@ -240,12 +271,11 @@ res_mode = lowercase(get(ENV, "TOFTWIN_RES_MODE", "cdf"))  # none | gh | cdf
 σt_us    = parse(Float64, get(ENV, "TOFTWIN_SIGMA_T_US", "100.0"))
 σt       = σt_us * 1e-6
 
-# NTOF selection
 ntof_env = lowercase(get(ENV, "TOFTWIN_NTOF", "auto"))
-α = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "2.0"))
-β = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "1.0"))
+α = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "1.5"))
+β = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "0.75"))
 ntof_min = parse(Int, get(ENV, "TOFTWIN_NTOF_MIN", "200"))
-ntof_max = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "1000"))
+ntof_max = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "2000"))
 ntof = (ntof_env in ("auto","suggest","0")) ? 0 : parse(Int, ntof_env)
 
 gh_order = parse(Int, get(ENV, "TOFTWIN_GH_ORDER", "3"))
@@ -310,7 +340,7 @@ cdf_work = step("precompute CDF smear work (optional)", () -> begin
         w = TOFtwin.precompute_tof_smear_work_diskcached(inst;
             pixels=pix_used, Ei_meV=Ei, tof_edges_s=tof_edges, resolution=resolution,
             cache_dir=cache_dir,
-            cache_tag=cache_ver * "|instr=$(String(instr))|ψ=$(ψstride)|η=$(ηstride)"
+            cache_tag=cache_ver * "|instr=$(String(instr))|ψ=$(ψstride)|η=$(ηstride)|group=$(grouping)|gfile=$(grouping_file)|mask=$(bytes2hex(sha1(mask_btp)))|angstep=$(angle_step)"
         )
         @info "Using disk-cached CDF smear work"
         return w
@@ -344,6 +374,14 @@ Cv = step("Cv (flat) load/compute", () -> begin
         serialize(io, rebuild_geom)
         st = try stat(idf_path) catch; nothing end
         serialize(io, st === nothing ? nothing : (st.mtime, st.size))
+
+        # NEW: grouping/masking settings in cache key
+        serialize(io, grouping)
+        serialize(io, grouping_file)
+        serialize(io, mask_btp)
+        serialize(io, mask_mode)
+        serialize(io, Float64(angle_step))
+
         serialize(io, Int32[p.id for p in pix_used])
         serialize(io, Ei)
         serialize(io, tof_edges)
@@ -447,6 +485,14 @@ function load_or_build_reduce_map()
     serialize(io, idf_path)
     st = try stat(idf_path) catch; nothing end
     serialize(io, st === nothing ? nothing : (st.mtime, st.size))
+
+    # NEW: grouping/masking settings in cache key
+    serialize(io, grouping)
+    serialize(io, grouping_file)
+    serialize(io, mask_btp)
+    serialize(io, mask_mode)
+    serialize(io, Float64(angle_step))
+
     serialize(io, Int32[p.id for p in pix_used])
     serialize(io, Ei)
     serialize(io, tof_edges)
@@ -514,7 +560,6 @@ step("reduce (Hraw/Hsum/Hwt one pass)", () -> reduce_three!(Hraw, Hsum, Hwt, pix
 Hmean = Hist2D(Q_edges, ω_edges)
 step("compute Hmean", () -> (Hmean.counts .= Hsum.counts ./ (Hwt.counts .+ 1e-12)))
 
-# Plot
 Q_cent = 0.5 .* (Q_edges[1:end-1] .+ Q_edges[2:end])
 ω_cent = 0.5 .* (ω_edges[1:end-1] .+ ω_edges[2:end])
 

@@ -4,8 +4,6 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 using TOFtwin
 
-# NOTE: SEQUOIA has ~120k pixels; plotting all of them can be slow.
-# For interactive work, ψstride/ηstride = 2..4 is often nicer.
 CFG = Dict(
     :backend   => :gl,
     :idf_src   => :SEQUOIA,
@@ -16,8 +14,16 @@ CFG = Dict(
     :title     => "SEQUOIA from IDF",
     :bank_regex=> nothing,
 
-    :ψstride   => 2,   # <-- recommended default for interactivity
+    :ψstride   => 2,
     :ηstride   => 2,
+
+    # NEW: grouping/masking
+    :grouping  => "",
+    :grouping_file => nothing,
+    :mask_btp  => "",
+    :mask_mode => :drop,
+    :powder_angle_step => 0.5,
+    :outdir    => "out",
 
     :cached    => true,
     :rebuild   => false,

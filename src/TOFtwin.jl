@@ -26,6 +26,9 @@ include("single_crystal.jl")
 
 include("goniometer.jl")
 
+# NEW: Mantid-like masking + grouping (speed-first)
+include("grouping_masking.jl")
+
 include("view_detector.jl")
 
 include("mantid_idf.jl")
@@ -88,5 +91,14 @@ export precompute_pixel_tof_kinematics, predict_cut_mean_Hω_hkl_scan_aligned
 export detector_cloud, filter_pixels, decimate_pixels_angular
 
 export precompute_pixel_tof_Qω_map, predict_pixel_tof_diskcached
+
+# NEW exports
+export MaskBTP, mask_btp
+export GroupDetectors, group_detectors
+export GenerateGroupingPowder, generate_grouping_powder
+export read_grouping_xml
+export grouping_xml_path
+export parse_mask_btp_spec
+export apply_grouping_masking
 
 end

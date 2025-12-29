@@ -5,7 +5,6 @@
 
 using Statistics
 
-
 """
     idf_path(instr::Symbol) -> String
 
@@ -33,14 +32,6 @@ detector_cloud_from_idf(instr::Symbol; kwargs...) =
     load_instrument_idf(idf_path; cached=true, kwargs...)
 
 Load a Mantid IDF instrument, preferring the newer disk-cache loader when available.
-
-This is a thin compatibility shim so scripts/examples can load instruments quickly
-without needing to know whether the project is using the legacy loader
-(`TOFtwin.load_mantid_idf`) or the newer disk-cached loader
-(`TOFtwin.MantidIDF.load_mantid_idf_diskcached`).
-
-Returns whatever the underlying loader returns (typically an `out` object with
-fields like `inst`, `pixels`, and `meta`).
 """
 function load_instrument_idf(idf_path::AbstractString; cached::Bool=true, kwargs...)
     # Prefer the new disk-cached path when present.
@@ -63,10 +54,13 @@ end
 
 """
     detector_cloud_from_idf(idf_path; r_samp=nothing, bank_regex=nothing, ψstride=1, ηstride=1,
-                            cached=true, kwargs...)
+                            cached=true,
+                            grouping="", grouping_file=nothing, mask_btp="", mask_mode=:drop,
+                            outdir="out", angle_step=0.5,
+                            kwargs...)
 
-Convenience helper: load an IDF instrument (optionally disk-cached) and immediately
-build a plotting-friendly detector cloud via [`detector_cloud`](@ref).
+Convenience helper: load an IDF instrument (optionally disk-cached), optionally apply
+masking/grouping, and build a plotting-friendly detector cloud via `detector_cloud`.
 
 Returns a NamedTuple: `(cloud, inst, meta, out)`.
 """
@@ -76,6 +70,14 @@ function detector_cloud_from_idf(idf_path::AbstractString;
     ψstride::Int = 1,
     ηstride::Int = 1,
     cached::Bool = true,
+
+    grouping::AbstractString = "",
+    grouping_file::Union{Nothing,AbstractString} = nothing,
+    mask_btp = "",
+    mask_mode::Symbol = :drop,
+    outdir::AbstractString = "out",
+    angle_step::Real = 0.5,
+
     kwargs...,
 )
     out = load_instrument_idf(idf_path; cached=cached, kwargs...)
@@ -83,14 +85,24 @@ function detector_cloud_from_idf(idf_path::AbstractString;
 
     r_samp_L = r_samp === nothing ? inst.r_samp_L : r_samp
 
-    # Prefer pixels stored on the instrument; otherwise fall back to `out.pixels`.
-    pixels = if hasproperty(inst, :pixels)
+    pixels0 = if hasproperty(inst, :pixels)
         inst.pixels
     elseif hasproperty(out, :pixels)
         out.pixels
     else
         error("No pixels found on instrument/output. Expected `inst.pixels` or `out.pixels`.")
     end
+
+    pixels = apply_grouping_masking(pixels0;
+        instrument=inst.name,
+        grouping=grouping,
+        grouping_file=grouping_file,
+        mask_btp=mask_btp,
+        mask_mode=mask_mode,
+        outdir=outdir,
+        angle_step=angle_step,
+        return_meta=false,
+    )
 
     cloud = detector_cloud(pixels;
         r_samp=r_samp_L,

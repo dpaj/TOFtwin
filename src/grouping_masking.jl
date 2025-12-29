@@ -1,8 +1,72 @@
 # src/grouping_masking.jl
-# Mantid-analog helpers: MaskBTP / GroupDetectors / GenerateGroupingPowder
+#
+# Mantid-analog helpers (speed-first):
+#   - MaskBTP: mask detectors by Bank/Tube/Pixel (or DetectorList)
+#   - GroupDetectors: coarsen detector pixels using Mantid XML grouping files
+#   - GenerateGroupingPowder: simple 2θ binning -> Mantid XML grouping
+#
+# The key compatibility trick for TOFtwin:
+#   GroupDetectors defaults to IdMode=:representative, meaning the grouped pixel
+#   keeps the id of one real detector pixel from the group (the "representative").
+#   This preserves compatibility with existing code that calls L2(inst, p.id)
+#   and indexes matrices by pid = p.id.
 
 using EzXML
 using LinearAlgebra
+using SHA
+
+# --- EzXML compatibility shims (older EzXML on Windows) -----------------------
+
+# Name of a node/element
+function _xmlname(node)
+    # Prefer the property API (works on lots of EzXML versions)
+    try
+        return node.name
+    catch
+    end
+    # Fallbacks
+    if isdefined(EzXML, :name)
+        return EzXML.name(node)
+    elseif isdefined(EzXML, :nodename)
+        return EzXML.nodename(node)
+    else
+        return ""
+    end
+end
+
+# Iterate child *elements* (skip whitespace/text nodes) across EzXML versions
+function _xmlelements(node)
+    if isdefined(EzXML, :eachelement)
+        return EzXML.eachelement(node)              # iterator
+    elseif isdefined(EzXML, :elements)
+        return EzXML.elements(node)                 # Vector
+    else
+        # Fallback to DOM traversal via firstelement/nextelement
+        out = EzXML.Node[]
+        el = try node.firstelement catch; nothing end
+        while el !== nothing
+            push!(out, el)
+            el = try el.nextelement catch; nothing end
+        end
+        return out
+    end
+end
+
+# Attribute getter across versions
+function _xmlattr(node, key::AbstractString, default::AbstractString = "")
+    if isdefined(EzXML, :getattr)
+        try
+            return EzXML.getattr(node, key, default)
+        catch
+        end
+    end
+    # Many versions support dict-like access for attributes on elements
+    try
+        return haskey(node, key) ? String(node[key]) : default
+    catch
+        return default
+    end
+end
 
 # ----------------------------
 # Small utilities
@@ -13,8 +77,6 @@ Parse Mantid-style int specs like:
   ""               -> Int[]
   "1,2,5"          -> [1,2,5]
   "1-3,10,12-13"   -> [1,2,3,10,12,13]
-
-(Used by MaskBTP and grouping XML parsing.)
 """
 function _parse_intspec(s::AbstractString)
     s = strip(s)
@@ -38,7 +100,7 @@ end
 # Extract trailing digits from bank symbols like :bank42 -> 42 (or nothing)
 _banknum(bank::Symbol) = (m = match(r"(\d+)$", String(bank)); m === nothing ? nothing : parse(Int, m.captures[1]))
 
-# Convert r_L -> (ψ, η) using your convention: ψ=atan2(x,z), η=atan2(y, sqrt(x^2+z^2))
+# Convert r_L -> (ψ, η) using TOFtwin convention: ψ=atan2(x,z), η=atan2(y, sqrt(x^2+z^2))
 function _psi_eta_from_r(r)
     x, y, z = r[1], r[2], r[3]
     ψ = atan(x, z)
@@ -56,45 +118,61 @@ function _twotheta_deg_from_r(r)
 end
 
 # ----------------------------
-# Parse Mantid XML grouping file
+# Mantid XML grouping file parsing
 # ----------------------------
 
 """
 Read a Mantid XML grouping file (the <detector-grouping> format) and return:
   groups_detids::Vector{Vector{Int}}
 
-Supports <detids val="..."> (and also <ids val="..."> as Mantid docs show). :contentReference[oaicite:4]{index=4}
+Supports <detids val="..."> and <ids val="...">.
 """
 function read_grouping_xml(path::AbstractString)
     doc = EzXML.readxml(path)
-    root = EzXML.root(doc)
-    EzXML.name(root) == "detector-grouping" || throw(ArgumentError("Not a detector-grouping XML: $path"))
+
+    # root access differs across EzXML versions
+    root = try
+        EzXML.root(doc)
+    catch
+        doc.root
+    end
+
+    _xmlname(root) == "detector-grouping" ||
+        throw(ArgumentError("Not a detector-grouping XML: $path (root='$(_xmlname(root))')"))
 
     groups = Vector{Vector{Int}}()
-    for g in EzXML.children(root)
-        EzXML.name(g) == "group" || continue
+
+    for g in _xmlelements(root)
+        _xmlname(g) == "group" || continue
+
         dets = Int[]
-        for c in EzXML.children(g)
-            nm = EzXML.name(c)
+        for c in _xmlelements(g)
+            nm = _xmlname(c)
             (nm == "detids" || nm == "ids") || continue
-            val = EzXML.getattr(c, "val", "")
+            val = _xmlattr(c, "val", "")
             append!(dets, _parse_intspec(val))
         end
+
         isempty(dets) || push!(groups, dets)
     end
+
     return groups
 end
 
+
 # ----------------------------
-# MaskBTP (speed-first version)
+# MaskBTP (speed-first)
 # ----------------------------
 
 """
 MaskBTP analog.
 
-Semantics match Mantid: if Bank/Tube/Pixel is blank -> applies to all of that type. :contentReference[oaicite:5]{index=5}
+Semantics:
+- If Bank/Tube/Pixel is blank (or not provided), it matches all of that axis.
+- Bank/Tube/Pixel selection is ANDed.
+- DetectorList is ORed in.
 
-Assumptions in TOFtwin (documented so we can refine later):
+Assumptions in TOFtwin (can refine later):
 - pixel.bank (Symbol) is used for Bank selection (by trailing number, e.g. :bank42)
 - pixel.iψ is used as "Tube index"
 - pixel.iη is used as "Pixel index"
@@ -102,6 +180,7 @@ Assumptions in TOFtwin (documented so we can refine later):
 Mode:
 - :drop      -> remove masked pixels entirely (fastest downstream)
 - :zeroΩ     -> keep pixels but set ΔΩ = 0.0
+
 Returns: (pixels2, masked_detids)
 """
 function MaskBTP(pixels::AbstractVector;
@@ -131,11 +210,10 @@ function MaskBTP(pixels::AbstractVector;
         bank_ok  = isempty(bankset)  || (bnum !== nothing && (bnum in bankset))
         tube_ok  = isempty(tubeset)  || (p.iψ in tubeset)
         pixel_ok = isempty(pixset)   || (p.iη in pixset)
-        det_ok   = isempty(detset)   || (p.mantid_id in detset)
+        det_in_list = (!isempty(detset)) && (p.mantid_id in detset)
 
-        # Mantid-style: Bank/Tube/Pixel selection is an AND; DetectorList unions in.
         selected_btp = bank_ok && tube_ok && pixel_ok
-        selected = selected_btp || det_ok
+        selected = selected_btp || det_in_list
 
         if selected
             push!(masked_detids, p.mantid_id)
@@ -156,7 +234,6 @@ function MaskBTP(pixels::AbstractVector;
     return keep, masked_detids
 end
 
-# Julia-ish alias
 mask_btp(args...; kwargs...) = MaskBTP(args...; kwargs...)
 
 # ----------------------------
@@ -168,16 +245,24 @@ GroupDetectors analog in "coarsened geometry" mode:
 - Build super-pixels with r_L centroid, ψ/η from that centroid, and ΔΩ = sum(ΔΩ_i).
 - mantid_id becomes negative (synthetic) so it never collides with real detector IDs.
 
+IdMode:
+- :representative (default): grouped pixel id = representative real pixel id (p0.id)
+  This preserves compatibility with existing TOFtwin code that uses L2(inst, p.id)
+  and indexes Cs/Cv by pid = p.id.
+- :contiguous: grouped pixel id = 1..nGroups (requires deeper changes elsewhere)
+
 Input grouping can be:
-- GroupingFile=".../CNCS_8x2.xml"  (Mantid XML format) :contentReference[oaicite:6]{index=6}
+- GroupingFile=".../CNCS_8x2.xml"  (Mantid XML format)
 - groups_detids::Vector{Vector{Int}} (already parsed)
+
 Returns: (pixels_grouped, groups_members_idx)
 
 groups_members_idx are indices into the *original* pixels vector.
 """
 function GroupDetectors(pixels::AbstractVector;
                         GroupingFile::Union{Nothing,AbstractString}=nothing,
-                        groups_detids::Union{Nothing,Vector{Vector{Int}}}=nothing)
+                        groups_detids::Union{Nothing,Vector{Vector{Int}}}=nothing,
+                        IdMode::Symbol = :representative)
 
     (GroupingFile === nothing) == (groups_detids === nothing) &&
         throw(ArgumentError("Provide exactly one of GroupingFile or groups_detids"))
@@ -206,8 +291,7 @@ function GroupDetectors(pixels::AbstractVector;
         isempty(idxs) && continue
 
         gid += 1
-        # Use first member as template for "discrete" indices
-        p0 = pixels[idxs[1]]
+        p0 = pixels[idxs[1]]  # representative
 
         # Centroid + summed solid angle
         r̄ = p0.r_L * 0
@@ -222,8 +306,16 @@ function GroupDetectors(pixels::AbstractVector;
 
         # synthetic mantid_id: negative
         mantid_id = -gid
-        id = gid
 
+        id = if IdMode == :representative
+            p0.id
+        elseif IdMode == :contiguous
+            gid
+        else
+            throw(ArgumentError("Unknown IdMode=$IdMode (use :representative or :contiguous)"))
+        end
+
+        # Keep discrete indices (iψ,iη,bank) from representative
         pnew = typeof(p0)(id, mantid_id, r̄, ψ, η, p0.iψ, p0.iη, p0.bank, Ω)
 
         push!(grouped, pnew)
@@ -233,7 +325,6 @@ function GroupDetectors(pixels::AbstractVector;
     return grouped, members_idx
 end
 
-# Julia-ish alias
 group_detectors(args...; kwargs...) = GroupDetectors(args...; kwargs...)
 
 # ----------------------------
@@ -241,7 +332,7 @@ group_detectors(args...; kwargs...) = GroupDetectors(args...; kwargs...)
 # ----------------------------
 
 """
-GenerateGroupingPowder analog: group detectors by 2θ bins of width AngleStep degrees. :contentReference[oaicite:7]{index=7}
+GenerateGroupingPowder analog: group detectors by 2θ bins of width AngleStep degrees.
 
 Returns groups_detids::Vector{Vector{Int}} (detector IDs).
 Optionally writes GroupingFilename in Mantid XML format so it can be reused with GroupDetectors.
@@ -254,18 +345,17 @@ function GenerateGroupingPowder(pixels::AbstractVector;
     step > 0 || throw(ArgumentError("AngleStep must be > 0"))
 
     bins = Dict{Int, Vector{Int}}()  # bin_id -> detids
-
     for p in pixels
         tt = _twotheta_deg_from_r(p.r_L)
         bid = Int(floor(tt / step))
         push!(get!(bins, bid, Int[]), p.mantid_id)
     end
 
-    # stable order by increasing 2θ bin
     bids = sort(collect(keys(bins)))
     groups = [bins[bid] for bid in bids]
 
     if GroupingFilename !== nothing
+        mkpath(dirname(GroupingFilename))
         open(GroupingFilename, "w") do io
             println(io, """<?xml version="1.0" encoding="UTF-8" ?>""")
             println(io, """<detector-grouping>""")
@@ -281,3 +371,146 @@ function GenerateGroupingPowder(pixels::AbstractVector;
 end
 
 generate_grouping_powder(args...; kwargs...) = GenerateGroupingPowder(args...; kwargs...)
+
+# ----------------------------
+# Convenience: find built-in grouping files + apply workflow
+# ----------------------------
+
+"""
+Return candidate search directories for grouping XML files inside the repo.
+We check a few common locations so you can drop the XMLs in either scripts/ or assets/.
+"""
+function _grouping_search_dirs()
+    # grouping_masking.jl is in src/, so repo root is one level up
+    repo_root = normpath(joinpath(@__DIR__, ".."))
+    return (
+        joinpath(repo_root, "assets", "grouping"),
+        joinpath(repo_root, "scripts", "grouping"),
+        joinpath(repo_root, "scripts"),
+    )
+end
+
+"""
+Resolve a grouping tag like "8x2" to a file path, searching repo locations.
+
+For CNCS, expects filenames like:
+  CNCS_2x1.xml, CNCS_4x1.xml, CNCS_8x1.xml, CNCS_4x2.xml, CNCS_8x2.xml
+"""
+function grouping_xml_path(instrument::Union{Symbol,AbstractString}, grouping::AbstractString)
+    instr = instrument isa Symbol ? String(instrument) : String(instrument)
+    instr = uppercase(instr)
+
+    fname = if instr == "CNCS"
+        "CNCS_$(grouping).xml"
+    else
+        # You can extend later (SEQUOIA, etc.)
+        "$(instr)_$(grouping).xml"
+    end
+
+    for d in _grouping_search_dirs()
+        path = joinpath(d, fname)
+        isfile(path) && return path
+    end
+
+    throw(ArgumentError("Grouping XML not found for instrument=$instr grouping='$grouping'. Expected file '$fname' in one of: $(_grouping_search_dirs())"))
+end
+
+"""
+Parse a simple MaskBTP spec string like:
+  "Bank=40-50;Tube=;Pixel=;DetectorList=123,124;Mode=drop"
+
+Returns a NamedTuple suitable for passing as kwargs to MaskBTP.
+"""
+function parse_mask_btp_spec(spec::AbstractString)
+    spec = strip(spec)
+    isempty(spec) && return NamedTuple()
+    parts = split(spec, ';')
+    kv = Dict{Symbol,Any}()
+    for p in parts
+        p = strip(p)
+        isempty(p) && continue
+        if !occursin('=', p)
+            throw(ArgumentError("Bad MaskBTP spec chunk '$p' (expected key=value)"))
+        end
+        k, v = split(p, '=', limit=2)
+        ksym = Symbol(strip(k))
+        vstr = strip(v)
+        if ksym == :Mode
+            kv[:Mode] = Symbol(lowercase(vstr))
+        else
+            kv[ksym] = vstr
+        end
+    end
+    return (; kv...)
+end
+
+"""
+Apply masking + grouping in one call.
+
+Arguments:
+- pixels: Vector{DetectorPixel}
+- instrument: :CNCS / :SEQUOIA (used to resolve built-in grouping xml if needed)
+- grouping:
+    "" (no grouping)
+    "2x1","4x1","8x1","4x2","8x2"  (load grouping XML)
+    "powder"                      (generate grouping by 2θ bins, write xml to outdir)
+- grouping_file: optional explicit path overriding built-in resolution
+- mask_btp:
+    "" (no mask) OR a spec string OR a Dict/NamedTuple of MaskBTP kwargs
+- mask_mode: :drop or :zeroΩ (used if mask_btp is spec string without Mode)
+- angle_step: used only for grouping="powder"
+- return_meta: if true, returns (pixels=..., meta=NamedTuple)
+"""
+function apply_grouping_masking(pixels::AbstractVector;
+                                instrument::Union{Symbol,AbstractString} = :CNCS,
+                                grouping::AbstractString = "",
+                                grouping_file::Union{Nothing,AbstractString} = nothing,
+                                mask_btp = "",
+                                mask_mode::Symbol = :drop,
+                                outdir::AbstractString = "out",
+                                angle_step::Real = 0.5,
+                                return_meta::Bool = false)
+
+    meta = (mask = nothing, grouping = nothing)
+
+    # ---- masking
+    pix = pixels
+    if mask_btp isa AbstractString
+        if !isempty(strip(mask_btp))
+            nt = parse_mask_btp_spec(mask_btp)
+            if !haskey(nt, :Mode)
+                nt = merge(nt, (; Mode=mask_mode))
+            end
+            pix2, masked = MaskBTP(pix; nt...)
+            pix = pix2
+            meta = merge(meta, (mask=(masked_detids=masked, spec=mask_btp, mode=nt.Mode),))
+        end
+    elseif mask_btp isa Dict || mask_btp isa NamedTuple
+        pix2, masked = MaskBTP(pix; mask_btp...)
+        pix = pix2
+        meta = merge(meta, (mask=(masked_detids=masked, spec=mask_btp, mode=get(mask_btp, :Mode, mask_mode)),))
+    elseif mask_btp === nothing
+        # do nothing
+    else
+        throw(ArgumentError("mask_btp must be String, Dict, NamedTuple, or nothing"))
+    end
+
+    # ---- grouping
+    g = strip(grouping)
+    if !isempty(g)
+        if lowercase(g) == "powder"
+            gxml = joinpath(outdir, "powdergroupfile.xml")
+            groups = GenerateGroupingPowder(pix; AngleStep=angle_step, GroupingFilename=gxml)
+            pixg, members = GroupDetectors(pix; groups_detids=groups, IdMode=:representative)
+            pix = pixg
+            meta = merge(meta, (grouping=(kind=:powder, file=gxml, angle_step=angle_step, members_idx=members),))
+        else
+            gfile = grouping_file === nothing ? grouping_xml_path(instrument, g) : grouping_file
+            pixg, members = GroupDetectors(pix; GroupingFile=gfile, IdMode=:representative)
+            pix = pixg
+            meta = merge(meta, (grouping=(kind=:xml, file=gfile, tag=g, members_idx=members),))
+        end
+    end
+
+    return return_meta ? (pixels=pix, meta=meta) : pix
+end
