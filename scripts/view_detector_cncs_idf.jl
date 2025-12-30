@@ -17,9 +17,9 @@ CFG = Dict(
     :ηstride   => 1,
 
     # NEW: grouping/masking (Mantid-like)
-    :grouping  => "",          # "" | "2x1" | "4x1" | "8x1" | "4x2" | "8x2" | "powder"
+    :grouping  => "8x2",          # "" | "2x1" | "4x1" | "8x1" | "4x2" | "8x2" | "powder"
     :grouping_file => nothing, # override with explicit path if desired
-    :mask_btp  => "",          # e.g. "Bank=40-50;Mode=drop" or Dict(...)
+    :mask_btp  => "Bank=36-50;Mode=drop",          # e.g. "Bank=40-50;Mode=drop" or Dict(...)
     :mask_mode => :drop,
     :powder_angle_step => 0.5,
     :outdir    => "out",
