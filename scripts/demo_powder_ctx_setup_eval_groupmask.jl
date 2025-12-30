@@ -91,9 +91,9 @@ disk_cache && mkpath(cache_dir)
 #   TOFTWIN_MASK_BTP=""        e.g. "Bank=40-50;Mode=drop" or "DetectorList=123,124"
 #   TOFTWIN_MASK_MODE=drop|zeroΩ (used if spec omits Mode)
 #   TOFTWIN_POWDER_ANGLESTEP=0.5
-grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "8x2"))
+grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "4x2"))
 grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
-mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")
+mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "")
 mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
 angle_step    = parse(Float64, get(ENV, "TOFTWIN_POWDER_ANGLESTEP", "0.5"))
 

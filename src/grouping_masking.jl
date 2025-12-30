@@ -438,19 +438,37 @@ function grouping_xml_path(instrument::Union{Symbol,AbstractString}, grouping::A
     instr = instrument isa Symbol ? String(instrument) : String(instrument)
     instr = uppercase(instr)
 
-    fname = if instr == "CNCS"
-        "CNCS_$(grouping).xml"
-    else
-        # You can extend later (SEQUOIA, etc.)
-        "$(instr)_$(grouping).xml"
+    # Normalize common instrument aliases
+    names = String[instr]
+    if instr == "SEQUOIA"
+        push!(names, "SEQ")
+    elseif instr == "SEQ"
+        push!(names, "SEQUOIA")
     end
+    names = unique(names)
+
+    # Candidate filenames (we try a few common conventions)
+    fnames = String[]
+    for nm in names
+        push!(fnames, "$(nm)_$(grouping)_grouping.xml")
+        push!(fnames, "$(nm)_$(grouping).xml")
+        push!(fnames, "$(nm)_$(grouping)_grouping.XML")  # harmless on Windows; helps on case-sensitive FS if someone used caps
+        push!(fnames, "$(nm)_$(grouping).XML")
+    end
+    fnames = unique(fnames)
 
     for d in _grouping_search_dirs()
-        path = joinpath(d, fname)
-        isfile(path) && return path
+        for fname in fnames
+            path = joinpath(d, fname)
+            isfile(path) && return path
+        end
     end
 
-    throw(ArgumentError("Grouping XML not found for instrument=$instr grouping='$grouping'. Expected file '$fname' in one of: $(_grouping_search_dirs())"))
+    throw(ArgumentError(
+        "Grouping XML not found for instrument=$instr grouping='$(grouping)'. " *
+        "Tried files: $(fnames). " *
+        "Searched dirs: $(_grouping_search_dirs())"
+    ))
 end
 
 """
