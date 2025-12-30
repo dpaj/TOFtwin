@@ -93,7 +93,7 @@ disk_cache && mkpath(cache_dir)
 #   TOFTWIN_POWDER_ANGLESTEP=0.5
 grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "4x2"))
 grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
-mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "")
+mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")#Bank=36-50
 mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
 angle_step    = parse(Float64, get(ENV, "TOFTWIN_POWDER_ANGLESTEP", "0.5"))
 

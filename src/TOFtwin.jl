@@ -32,6 +32,8 @@ include("grouping_masking.jl")
 include("view_detector.jl")
 
 include("mantid_idf.jl")
+include("workflows_common.jl")
+include("workflows_powder.jl")
 using .MantidIDF: load_mantid_idf,
                  load_mantid_idf_cached,
                  load_mantid_idf_diskcached,
@@ -100,5 +102,9 @@ export read_grouping_xml
 export grouping_xml_path
 export parse_mask_btp_spec
 export apply_grouping_masking
+
+export PowderCtx, ReduceMapPowder
+export setup_powder_ctx, eval_powder
+export build_reduce_map_powder
 
 end
