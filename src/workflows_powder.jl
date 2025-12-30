@@ -22,6 +22,176 @@ struct ReduceMapPowder
     valid::BitMatrix
 end
 
+# -----------------------------
+# PyChop effective σt(t) helper (stdlib-only)
+# -----------------------------
+
+const _FWHM_PER_SIGMA = 2.3548200450309493
+
+@inline function _median_real(x::AbstractVector{<:Real})
+    n = length(x)
+    n == 0 && throw(ArgumentError("median of empty vector"))
+    v = sort!(collect(Float64.(x)))
+    if isodd(n)
+        return v[(n+1) >>> 1]
+    else
+        i = n >>> 1
+        return 0.5 * (v[i] + v[i+1])
+    end
+end
+
+"""Linear interpolation y(x) at query xq with clamped endpoints."""
+@inline function _interp1_clamped(x::Vector{Float64}, y::Vector{Float64}, xq::Float64)
+    n = length(x)
+    n == 0 && return NaN
+    xq <= x[1]  && return y[1]
+    xq >= x[end] && return y[end]
+    i = searchsortedlast(x, xq)
+    i < 1 && return y[1]
+    i >= n && return y[end]
+    x0 = x[i]; x1 = x[i+1]
+    y0 = y[i]; y1 = y[i+1]
+    t = (xq - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
+end
+
+function _run_pychop_oracle_dE(; python::AbstractString,
+    script::AbstractString,
+    instrument::Symbol,
+    Ei_meV::Real,
+    variant::AbstractString="",
+    freq_hz::AbstractVector{<:Real}=Float64[],
+    tc_index::Int=0,
+    use_tc_rss::Bool=true,
+    delta_td_us::Real=0.0,
+    etrans_min_meV::Real=0.0,
+    etrans_max_meV::Real=0.0,
+    npts::Int=401)
+
+    args = String[
+        String(python),
+        String(script),
+        "--instrument", String(instrument),
+        "--Ei", string(Float64(Ei_meV)),
+        "--etrans-min", string(Float64(etrans_min_meV)),
+        "--etrans-max", string(Float64(etrans_max_meV)),
+        "--npts", string(Int(npts)),
+        "--tc-index", string(Int(tc_index)),
+        "--delta-td-us", string(Float64(delta_td_us)),
+        "--tc-mode", (use_tc_rss ? "rss" : "first"),
+    ]
+    if !isempty(variant)
+        append!(args, ["--variant", String(variant)])
+    end
+    if !isempty(freq_hz)
+        fstr = join(string.(Float64.(freq_hz)), ",")
+        append!(args, ["--freq", fstr])
+    end
+
+    cmd = Cmd(args)
+    out = try
+        read(cmd, String)
+    catch err
+        throw(ErrorException("PyChop oracle failed. Command was: $(repr(cmd))\nError: $(err)"))
+    end
+
+    xs = Float64[]
+    ys = Float64[]
+    for line in split(out, '\n')
+        s = strip(line)
+        isempty(s) && continue
+        startswith(s, "#") && continue
+        cols = split(s)
+        length(cols) < 2 && continue
+        push!(xs, parse(Float64, cols[1]))
+        push!(ys, parse(Float64, cols[2]))
+    end
+    isempty(xs) && throw(ErrorException("PyChop oracle returned no data. Output:\n" * out))
+    return xs, ys
+end
+
+"""
+    _pychop_effective_sigma_t_bins(inst, pixels, Ei_meV, tof_edges_s; ...)
+
+Compute an *effective* TOF-domain σt(t) per TOF bin such that the implied
+energy-width roughly matches a PyChop ΔE(ω) curve:
+
+    σ_ω(t) ≈ (ΔE_FWHM(ω(t)) / 2.355)
+    σt(t)  =  σ_ω(t) / |dω/dt|
+
+This is a pragmatic bridge: it preserves PyChop's configuration → resolution mapping,
+but expresses it as a TOF-domain convolution width that we can feed to the CDF kernel.
+"""
+function _pychop_effective_sigma_t_bins(inst::Instrument,
+        pixels::Vector{DetectorPixel},
+        Ei_meV::Float64,
+        tof_edges_s::Vector{Float64};
+        python::AbstractString="python",
+        script::AbstractString=joinpath(@__DIR__, "..", "scripts", "pychop_oracle_dE.py"),
+        instrument::Symbol=:CNCS,
+        variant::AbstractString="",
+        freq_hz::AbstractVector{<:Real}=Float64[],
+        tc_index::Int=0,
+        use_tc_rss::Bool=true,
+        delta_td_us::Float64=0.0,
+        npts::Int=401)
+
+    # Representative L2 for mapping ω(t) and dω/dt.
+    L2s = [L2(inst, p.id) for p in pixels]
+    L2ref = _median_real(L2s)
+
+    # ω range we need (from TOF bin centers)
+    nT = length(tof_edges_s) - 1
+    ω_cent = Vector{Float64}(undef, nT)
+    @inbounds for it in 1:nT
+        t = 0.5 * (tof_edges_s[it] + tof_edges_s[it+1])
+        Ef = try
+            Ef_from_tof(inst.L1, L2ref, Ei_meV, t)
+        catch
+            ω_cent[it] = NaN
+            continue
+        end
+        ω_cent[it] = Ei_meV - Ef
+    end
+
+    ωf = filter(isfinite, ω_cent)
+    isempty(ωf) && throw(ArgumentError("No finite ω values found from TOF window; can't build PyChop σt(t)"))
+    ωmin = minimum(ωf)
+    ωmax = maximum(ωf)
+
+    # Ask the oracle for a smooth ΔE_FWHM(ω) curve over that domain.
+    xs, dE_fwhm = _run_pychop_oracle_dE(
+        python=python,
+        script=script,
+        instrument=instrument,
+        Ei_meV=Ei_meV,
+        variant=variant,
+        freq_hz=freq_hz,
+        tc_index=tc_index,
+        use_tc_rss=use_tc_rss,
+        delta_td_us=delta_td_us,
+        etrans_min_meV=ωmin,
+        etrans_max_meV=ωmax,
+        npts=npts,
+    )
+
+    # Convert ΔE_FWHM(ω) to σ_ω, then to σt via local derivative.
+    σt_bins = zeros(Float64, nT)
+    @inbounds for it in 1:nT
+        ω = ω_cent[it]
+        if !isfinite(ω)
+            σt_bins[it] = 0.0
+            continue
+        end
+        dE = _interp1_clamped(xs, dE_fwhm, ω)               # meV (FWHM)
+        σω = dE / _FWHM_PER_SIGMA                           # meV (σ)
+        t = 0.5 * (tof_edges_s[it] + tof_edges_s[it+1])
+        dωdt = abs(dω_dt(inst.L1, L2ref, Ei_meV, t))         # meV/s
+        σt_bins[it] = (dωdt > 0) ? (σω / dωdt) : 0.0         # s
+    end
+    return σt_bins
+end
+
 """
     build_reduce_map_powder(inst, pixels, Ei_meV, tof_edges_s, Q_edges, ω_edges)
 
@@ -192,7 +362,22 @@ function setup_powder_ctx(;
     nQbins::Int=220,
     nωbins::Int=240,
     res_mode::AbstractString="cdf",
+    # Manual timing width (constant σt) in microseconds
     σt_us::Float64=100.0,
+    # Timing width source:
+    #   "manual"  -> use σt_us above
+    #   "pychop"  -> derive an effective σt(t) curve from a PyChop ΔE(ω) curve
+    #                and map it onto TOF-bin centers for a representative L2.
+    σt_source::AbstractString="manual",
+    # PyChop oracle settings (used when σt_source="pychop")
+    pychop_python::AbstractString="python",
+    pychop_script::AbstractString=joinpath(@__DIR__, "..", "scripts", "pychop_oracle_dE.py"),
+    pychop_variant::AbstractString="",
+    pychop_freq_hz::AbstractVector{<:Real}=Float64[],
+    pychop_tc_index::Int=0,
+    pychop_use_tc_rss::Bool=true,
+    pychop_delta_td_us::Float64=0.0,
+    pychop_npts::Int=401,
     gh_order::Int=3,
     nsigma::Float64=6.0,
     ntof_env::AbstractString="auto",
@@ -270,11 +455,38 @@ function setup_powder_ctx(;
     tof_edges = collect(range(tmin, tmax; length=ntof+1))
 
     # --- resolution ---
-    resolution =
-        (lowercase(res_mode) == "none" || σt_us <= 0) ? NoResolution() :
-        (lowercase(res_mode) == "gh")  ? GaussianTimingResolution(σt; order=gh_order) :
-        (lowercase(res_mode) == "cdf") ? GaussianTimingCDFResolution(σt; nsigma=nsigma) :
+    # Note: For σt_source="pychop", we build a TOF-dependent σt(t) curve and
+    #       wrap it in GaussianTimingCDFResolution(σt_bins; ...).
+    res_mode_l = lowercase(res_mode)
+    σt_source_l = lowercase(String(σt_source))
+
+    resolution = if res_mode_l == "none" || σt_us <= 0
+        NoResolution()
+    elseif res_mode_l == "gh"
+        GaussianTimingResolution(σt; order=gh_order)
+    elseif res_mode_l == "cdf"
+        if σt_source_l == "pychop"
+            # Build effective σt(t) so that σ_ω(t) ≈ ΔE_PyChop(ω(t))/2.355
+            # (We treat the PyChop curve as FWHM by default; the oracle script
+            # can be changed to emit σ directly if desired.)
+            σt_bins = _pychop_effective_sigma_t_bins(inst, pixels, Ei, tof_edges;
+                python=pychop_python,
+                script=pychop_script,
+                instrument=instr,
+                variant=pychop_variant,
+                freq_hz=pychop_freq_hz,
+                tc_index=pychop_tc_index,
+                use_tc_rss=pychop_use_tc_rss,
+                delta_td_us=pychop_delta_td_us,
+                npts=pychop_npts,
+            )
+            GaussianTimingCDFResolution(σt_bins; nsigma=nsigma)
+        else
+            GaussianTimingCDFResolution(σt; nsigma=nsigma)
+        end
+    else
         throw(ArgumentError("TOFTWIN_RES_MODE must be none|gh|cdf (got '$res_mode')"))
+    end
 
     # --- optional CDF work ---
     cdf_work = if (resolution isa GaussianTimingCDFResolution)
