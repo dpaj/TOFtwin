@@ -117,7 +117,17 @@ function precompute_tof_smear_work_diskcached(inst::Instrument;
     serialize(io, typeof(resolution))
     serialize(io, resolution.nsigma)
     # Note: for callable σt, we store only the fact it's callable; cache_tag should capture versioning.
-    serialize(io, resolution.σt isa Function ? :callable : Float64(resolution.σt))
+    if resolution.σt isa Function
+        serialize(io, :callable)
+    elseif resolution.σt isa AbstractVector
+        serialize(io, :vector)
+        # include the curve values in the key; this is small (O(n_tof)) and makes caching safe
+        σv = Float64.(resolution.σt)
+        serialize(io, length(σv))
+        serialize(io, σv)
+    else
+        serialize(io, Float64(resolution.σt))
+    end
     serialize(io, cache_tag)
 
     key = "cdf_smear_work_" * bytes2hex(sha1(take!(io)))
