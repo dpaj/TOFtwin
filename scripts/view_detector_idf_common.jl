@@ -119,8 +119,10 @@ function view_detector_idf(; cfg::Dict)
     outdir        = get(cfg, :outdir, "out")
     angle_step    = get(cfg, :powder_angle_step, 0.5)
 
+    instr_key = cfg[:idf_src] isa Symbol ? cfg[:idf_src] : inst.name
+
     pixels = TOFtwin.apply_grouping_masking(pixels0;
-        instrument=inst.name,
+        instrument=instr_key,
         grouping=grouping,
         grouping_file=grouping_file,
         mask_btp=mask_btp,

@@ -14,11 +14,11 @@ CFG = Dict(
     :title     => "SEQUOIA from IDF",
     :bank_regex=> nothing,
 
-    :ψstride   => 2,
-    :ηstride   => 2,
+    :ψstride   => 1,
+    :ηstride   => 1,
 
     # NEW: grouping/masking
-    :grouping  => "",
+    :grouping  => "4x2",
     :grouping_file => nothing,
     :mask_btp  => "",
     :mask_mode => :drop,
