@@ -79,7 +79,7 @@ disk_cache && mkpath(cache_dir)
 #   TOFTWIN_MASK_BTP=""        e.g. "Bank=40-50;Mode=drop" or "DetectorList=123,124"
 #   TOFTWIN_MASK_MODE=drop|zeroΩ (used if spec omits Mode)
 #   TOFTWIN_POWDER_ANGLESTEP=0.5
-grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "8x2"))
+grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "4x2"))
 grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
 mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")
 mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
@@ -175,7 +175,7 @@ sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_
 
 kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
 
-default_Ei = instr === :SEQUOIA ? "30.0" : "25.0"
+default_Ei = instr === :SEQUOIA ? "30.0" : "12.0"
 Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
 nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
@@ -187,16 +187,23 @@ nωbins = parse(Int, get(ENV, "TOFTWIN_NWBINS", "240"))
 res_mode = lowercase(get(ENV, "TOFTWIN_RES_MODE", "cdf"))
 σt_us    = parse(Float64, get(ENV, "TOFTWIN_SIGMA_T_US", "100.0"))
 gh_order = parse(Int, get(ENV, "TOFTWIN_GH_ORDER", "3"))
-nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
+nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "6.0"))
 
 # Timing width source:
 #   TOFTWIN_SIGMA_T_SOURCE=manual (default) -> use TOFTWIN_SIGMA_T_US
 #   TOFTWIN_SIGMA_T_SOURCE=pychop          -> derive an *effective* σt(t) curve from PyChop ΔE(ω)
 σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "pychop"))
 
+# Optional: sanity-check that the TOFtwin TOF-smearing implies a ΔE(ω) consistent
+# with the raw PyChop oracle. (Turn off with TOFTWIN_PYCHOP_CHECK=0.)
+pychop_check = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK", "1")) in ("1", "true", "yes")
+
+# If non-empty, these Etrans values (meV) are used for the check.
+# (Otherwise, TOFtwin picks a small default list and clips to valid range.)
+pychop_check_etrans_meV = Float64[]
+
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
-#pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "python"))
-pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe"))
+pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
 pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "")
 pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "")
@@ -207,13 +214,233 @@ pychop_delta_td_us = parse(Float64, get(ENV, "TOFTWIN_PYCHOP_DELTA_TD_US", "0.0"
 pychop_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_NPTS", "401"))
 pychop_sigma_q = parse(Float64, get(ENV, "TOFTWIN_PYCHOP_SIGMA_Q", "0.25"))
 
+# Optional: generate a more detailed resolution comparison plot/table.
+#   TOFTWIN_PYCHOP_CHECK_PLOT=1
+pychop_check_plot = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT", "1")) in ("1","true","yes")
+pychop_check_plot_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPTS", "121"))
+pychop_check_plot_npix = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPIX", "3"))
+
 ntof_env   = get(ENV, "TOFTWIN_NTOF", "auto")
-ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "1.5"))
-ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "1.0"))
+ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "0.5"))
+ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "0.333333333333"))
 ntof_min   = parse(Int, get(ENV, "TOFTWIN_NTOF_MIN", "200"))
 ntof_max   = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "2000"))
 
 rebuild_geom = lowercase(get(ENV, "TOFTWIN_REBUILD_GEOM", "0")) in ("1","true","yes")
+
+# -----------------------------
+# Resolution comparison plot (PyChop vs TOFtwin)
+# -----------------------------
+
+const _C_US = 252.777  # t(μs) = C * L(m) / sqrt(E(meV))
+
+function _tof_us(L1_m::Float64, L2_m::Float64, Ei_meV::Float64, Ef_meV::Float64)
+    return _C_US * (L1_m / sqrt(Ei_meV) + L2_m / sqrt(Ef_meV))
+end
+
+function _Ef_from_tof_s(L1_m::Float64, L2_m::Float64, Ei_meV::Float64, t_s::Float64)
+    t_us = t_s * 1e6
+    t1_us = _C_US * L1_m / sqrt(Ei_meV)
+    t2_us = t_us - t1_us
+    t2_us <= 0 && return NaN
+    return (_C_US * L2_m / t2_us)^2
+end
+
+function _fwhm_monotonic_x(x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    n = length(x)
+    n == 0 && return NaN
+    ymax = maximum(y)
+    ymax <= 0 && return NaN
+    half = 0.5 * ymax
+    imax = argmax(y)
+
+    xL = NaN
+    for i in imax:-1:2
+        y1, y2 = y[i-1], y[i]
+        if y1 < half && y2 >= half
+            t = (half - y1) / (y2 - y1)
+            xL = float(x[i-1]) + t*(float(x[i]) - float(x[i-1]))
+            break
+        end
+    end
+
+    xR = NaN
+    for i in imax:1:(n-1)
+        y1, y2 = y[i], y[i+1]
+        if y1 >= half && y2 < half
+            t = (half - y1) / (y2 - y1)
+            xR = float(x[i]) + t*(float(x[i+1]) - float(x[i]))
+            break
+        end
+    end
+
+    return (isfinite(xL) && isfinite(xR)) ? (xR - xL) : NaN
+end
+
+function _run_pychop_oracle_curve(; python::AbstractString, script::AbstractString,
+    instrument::AbstractString, Ei_meV::Float64, variant::AbstractString,
+    freq_hz::Vector{Float64}, tc_index::Int, use_tc_rss::Bool,
+    delta_td_us::Float64, etrans_min::Float64, etrans_max::Float64, npts::Int)
+
+    freq_str = isempty(freq_hz) ? "" : join(string.(freq_hz), ",")
+    cmd = Cmd([
+        python,
+        script,
+        "--instrument", instrument,
+        "--Ei", string(Ei_meV),
+        "--variant", variant,
+        "--freq", freq_str,
+        "--tc-index", string(tc_index),
+        "--delta-td-us", string(delta_td_us),
+        "--etrans-min", string(etrans_min),
+        "--etrans-max", string(etrans_max),
+        "--npts", string(npts),
+    ]; ignorestatus=false)
+    if use_tc_rss
+        cmd = Cmd(vcat(collect(cmd.exec), ["--use-tc-rss"]); ignorestatus=false)
+    end
+
+    txt = read(cmd, String)
+    xs = Float64[]
+    ys = Float64[]
+    for line in eachline(IOBuffer(txt))
+        s = strip(line)
+        isempty(s) && continue
+        startswith(s, "#") && continue
+        f = split(s)
+        length(f) < 2 && continue
+        push!(xs, parse(Float64, f[1]))
+        push!(ys, parse(Float64, f[2]))
+    end
+    return xs, ys
+end
+
+function plot_resolution_compare(ctx::TOFtwin.PowderCtx; tag::AbstractString="")
+    (ctx.resolution isa TOFtwin.GaussianTimingCDFResolution) || return nothing
+    (ctx.cdf_work !== nothing) || return nothing
+
+    # pick representative pixels by L2 (min/mid/max)
+    L2s = [TOFtwin.L2(ctx.inst, p.id) for p in ctx.pixels]
+    perm = sortperm(L2s)
+    picks = unique(clamp.(round.(Int, LinRange(1, length(ctx.pixels), pychop_check_plot_npix)), 1, length(ctx.pixels)))
+    pix_test = [ctx.pixels[perm[i]] for i in picks]
+    L2_test = [TOFtwin.L2(ctx.inst, p.id) for p in pix_test]
+
+    # PyChop oracle curve
+    etrans_max = min(ctx.Ei_meV - 1e-3, ctx.Ei_meV)
+    etrans, dE_pychop = _run_pychop_oracle_curve(
+        python=pychop_python,
+        script=pychop_script,
+        instrument=String(ctx.instr),
+        Ei_meV=ctx.Ei_meV,
+        variant=pychop_variant,
+        freq_hz=Vector{Float64}(pychop_freq_hz),
+        tc_index=pychop_tc_index,
+        use_tc_rss=pychop_use_tc_rss,
+        delta_td_us=pychop_delta_td_us,
+        etrans_min=0.0,
+        etrans_max=etrans_max,
+        npts=pychop_npts,
+    )
+
+    # downsample for the TOFtwin impulse-FWHM calculation (can be expensive)
+    nplot = clamp(pychop_check_plot_npts, 5, length(etrans))
+    idx = unique(clamp.(round.(Int, LinRange(1, length(etrans), nplot)), 1, length(etrans)))
+    ωs = etrans[idx]
+    dE_py = dE_pychop[idx]
+
+    ntof = length(ctx.tof_edges_s) - 1
+    L1 = Float64(ctx.inst.L1)
+
+    # Compute TOFtwin FWHM(ω) for each test pixel
+    curves = Vector{Vector{Float64}}(undef, length(pix_test))
+    relerrs = Vector{Vector{Float64}}(undef, length(pix_test))
+
+    for (ip, p) in enumerate(pix_test)
+        L2p = Float64(L2_test[ip])
+        dE_tw = fill(NaN, length(ωs))
+
+        # Precompute ω edges for this pixel
+        ω_edges = similar(ctx.tof_edges_s, Float64)
+        for i in eachindex(ctx.tof_edges_s)
+            Ef = _Ef_from_tof_s(L1, L2p, ctx.Ei_meV, Float64(ctx.tof_edges_s[i]))
+            ω_edges[i] = isfinite(Ef) ? (ctx.Ei_meV - Ef) : NaN
+        end
+        ω_cent = 0.5 .* (ω_edges[1:end-1] .+ ω_edges[2:end])
+        dω = ω_edges[2:end] .- ω_edges[1:end-1]
+
+        C = zeros(Float64, 1, ntof)
+        for (k, ω0) in enumerate(ωs)
+            Ef0 = ctx.Ei_meV - ω0
+            Ef0 <= 0 && continue
+            t0_s = _tof_us(L1, L2p, ctx.Ei_meV, Ef0) * 1e-6
+            i0 = searchsortedlast(ctx.tof_edges_s, t0_s)
+            i0 = clamp(i0, 1, ntof)
+
+            fill!(C, 0.0)
+            C[1, i0] = 1.0
+
+            TOFtwin.apply_tof_resolution!(C, ctx.inst, [p], ctx.Ei_meV, ctx.tof_edges_s, ctx.resolution; work=ctx.cdf_work)
+
+            yω = similar(view(C, 1, :), Float64)
+            @inbounds for j in 1:ntof
+                denom = dω[j]
+                yω[j] = (isfinite(denom) && denom > 0) ? (C[1, j] / denom) : 0.0
+            end
+
+            # Restrict to finite x-range
+            good = findall(j -> isfinite(ω_cent[j]) && isfinite(yω[j]) && yω[j] >= 0, 1:ntof)
+            if !isempty(good)
+                x = ω_cent[good]
+                y = yω[good]
+                dE_tw[k] = _fwhm_monotonic_x(x, y)
+            end
+        end
+
+        curves[ip] = dE_tw
+        relerrs[ip] = (dE_tw .- dE_py) ./ dE_py
+    end
+
+    # Save a TSV table for quick inspection
+    if do_save
+        fname = isempty(tag) ? "pychop_resolution_compare.tsv" : "pychop_resolution_compare_$(tag).tsv"
+        outtsv = joinpath(outdir, fname)
+        open(outtsv, "w") do io
+            println(io, "# etrans_meV\tdE_pychop_FWHM_meV\t" * join(["dE_toftwin_FWHM_meV_pid$(p.id)" for p in pix_test], "\t"))
+            for k in eachindex(ωs)
+                vals = ["$(ωs[k])", "$(dE_py[k])"]
+                append!(vals, ["$(curves[ip][k])" for ip in eachindex(pix_test)])
+                println(io, join(vals, "\t"))
+            end
+        end
+        @info "Wrote $(outtsv)"
+    end
+
+    # Plot
+    fig = Figure(size=(1200, 800))
+    ax1 = Axis(fig[1,1], xlabel="ω (meV)", ylabel="ΔE FWHM (meV)", title="Resolution: PyChop vs TOFtwin (impulse+smear)")
+    lines!(ax1, ωs, dE_py, label="PyChop (oracle)")
+    for (ip, p) in enumerate(pix_test)
+        lines!(ax1, ωs, curves[ip], label="TOFtwin pid=$(p.id), L2=$(round(L2_test[ip], digits=3)) m")
+    end
+    axislegend(ax1; position=:rb)
+
+    ax2 = Axis(fig[2,1], xlabel="ω (meV)", ylabel="(TOFtwin-PyChop)/PyChop", title="Relative error")
+    hlines!(ax2, [0.0])
+    for (ip, p) in enumerate(pix_test)
+        lines!(ax2, ωs, relerrs[ip], label="pid=$(p.id)")
+    end
+    axislegend(ax2; position=:rb)
+
+    if do_save
+        fname = isempty(tag) ? "pychop_resolution_compare.png" : "pychop_resolution_compare_$(tag).png"
+        outpng = joinpath(outdir, fname)
+        save(outpng, fig)
+        @info "Wrote $(outpng)"
+    end
+    display(fig)
+    return fig
+end
 
 ctx = step("setup_powder_ctx", () -> TOFtwin.setup_powder_ctx(;
     instr=instr,
@@ -241,12 +468,18 @@ ctx = step("setup_powder_ctx", () -> TOFtwin.setup_powder_ctx(;
     pychop_delta_td_us=pychop_delta_td_us,
     pychop_npts=pychop_npts,
     pychop_sigma_q=pychop_sigma_q,
+	pychop_check=pychop_check,
+	pychop_check_etrans_meV=pychop_check_etrans_meV,
     ntof_env=ntof_env, ntof_alpha=ntof_alpha, ntof_beta=ntof_beta, ntof_min=ntof_min, ntof_max=ntof_max,
     disk_cache=disk_cache, cache_dir=cache_dir, cache_ver=cache_ver,
     cache_Cv=cache_Cv, cache_rmap=cache_rmap
 ))
 
 @info "SETUP complete. ctx pixels=$(length(ctx.pixels)) grouping='$(grouping)' mask='$(mask_btp)' res_mode='$(res_mode)'"
+
+if pychop_check_plot && (σt_source == "pychop") && (res_mode == "cdf")
+    step("plot pychop resolution compare", () -> plot_resolution_compare(ctx; tag=lowercase(String(instr))))
+end
 
 for (i, spath) in enumerate(sunny_paths)
     kern = (i == 1) ? kern0 : step("load Sunny kernel", () -> load_sunny_powder_jld2(spath; outside=0.0))

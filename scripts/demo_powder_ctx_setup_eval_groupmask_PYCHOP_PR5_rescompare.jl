@@ -79,7 +79,7 @@ disk_cache && mkpath(cache_dir)
 #   TOFTWIN_MASK_BTP=""        e.g. "Bank=40-50;Mode=drop" or "DetectorList=123,124"
 #   TOFTWIN_MASK_MODE=drop|zeroΩ (used if spec omits Mode)
 #   TOFTWIN_POWDER_ANGLESTEP=0.5
-grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "8x2"))
+grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "4x2"))
 grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
 mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")
 mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
@@ -164,6 +164,100 @@ function plot_result(ctx::TOFtwin.PowderCtx, kern::TOFtwin.GridKernelPowder, pre
     display(fig)
 end
 
+# -----------------------------
+# Optional: plot PyChop vs TOFtwin-implied ΔE(ω)
+# -----------------------------
+
+const pychop_check_plot = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT", "1")) in ("1","true","yes")
+const pychop_check_plot_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPTS", "121"))
+const pychop_check_plot_npix = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPIX", "3"))
+
+function _write_tsv(path::AbstractString, rows)
+    open(path, "w") do io
+        println(io, "pixel_id\tL2_m\tetrans_meV\tdE_pychop_FWHM_meV\tdE_toftwin_FWHM_meV\trel_err")
+        for r in rows
+            println(io,
+                "$(r.pixel_id)\t$(r.L2_m)\t$(r.etrans_meV)\t$(r.dE_pychop_FWHM_meV)\t$(r.dE_toftwin_FWHM_meV)\t$(r.rel_err)")
+        end
+    end
+end
+
+function plot_pychop_resolution_compare(ctx::TOFtwin.PowderCtx; tag::AbstractString="")
+    # Only meaningful for CDF timing resolution
+    (ctx.resolution isa TOFtwin.GaussianTimingCDFResolution) || return nothing
+    (ctx.cdf_work !== nothing) || return nothing
+
+    # Pull a smooth ΔE(ω) curve from the PyChop oracle.
+    # NOTE: `etrans_max` must be specified *before* we have `et_oracle`.
+    et_oracle, dE_oracle = TOFtwin._run_pychop_oracle_dE(
+        python=pychop_python,
+        script=pychop_script,
+        instrument=ctx.instr,
+        Ei_meV=ctx.Ei_meV,
+        variant=pychop_variant,
+        freq_hz=pychop_freq_hz,
+        tc_index=pychop_tc_index,
+        use_tc_rss=pychop_use_tc_rss,
+        delta_td_us=pychop_delta_td_us,
+        etrans_min=0.0,
+        etrans_max=max(0.0, ctx.Ei_meV - 1e-3),
+        npts=pychop_npts,
+    )
+
+    meta = (etrans_meV = Vector{Float64}(et_oracle), dE_fwhm_meV = Vector{Float64}(dE_oracle))
+
+    emax = min(ctx.Ei_meV - 1e-3, maximum(meta.etrans_meV))
+    et_test = collect(range(max(0.0, meta.etrans_meV[1]), emax; length=max(5, pychop_check_plot_npts)))
+
+    rows = TOFtwin.pychop_check_dE(
+        ctx.inst, ctx.pixels, ctx.Ei_meV, ctx.tof_edges_s, ctx.resolution, ctx.cdf_work, meta;
+        etrans_test_meV=et_test,
+        npix_test=pychop_check_plot_npix,
+    )
+    isempty(rows) && return nothing
+
+    # group rows by pixel_id
+    pids = unique(r.pixel_id for r in rows)
+    sort!(pids)
+
+    fig = Figure(size=(1400, 900))
+    ax1 = Axis(fig[1, 1], xlabel="Etransfer (meV)", ylabel="ΔE FWHM (meV)",
+        title="Resolution comparison (PyChop oracle vs TOFtwin-implied)")
+    lines!(ax1, meta.etrans_meV, meta.dE_fwhm_meV, label="PyChop oracle")
+
+    ax2 = Axis(fig[2, 1], xlabel="Etransfer (meV)", ylabel="(TOFtwin − PyChop)/PyChop",
+        title="Relative error")
+    hlines!(ax2, [0.0])
+
+    for pid in pids
+        rr = [r for r in rows if r.pixel_id == pid]
+        sort!(rr, by = r -> r.etrans_meV)
+        et = [r.etrans_meV for r in rr]
+        dE_t = [r.dE_toftwin_FWHM_meV for r in rr]
+        rel = [r.rel_err for r in rr]
+        L2m = rr[1].L2_m
+        lines!(ax1, et, dE_t, label="TOFtwin pixel $(pid) (L2=$(round(L2m, digits=3)) m)")
+        lines!(ax2, et, rel, label="pixel $(pid)")
+    end
+
+    axislegend(ax1; position=:rb)
+    axislegend(ax2; position=:rb)
+
+    if do_save
+        base = isempty(tag) ? "pychop_resolution_compare_$(lowercase(String(ctx.instr)))" :
+                              "pychop_resolution_compare_$(lowercase(String(ctx.instr)))_$(tag)"
+        outpng = joinpath(outdir, base * ".png")
+        outtsv = joinpath(outdir, base * ".tsv")
+        save(outpng, fig)
+        _write_tsv(outtsv, rows)
+        @info "Wrote $outpng"
+        @info "Wrote $outtsv"
+    end
+
+    display(fig)
+    return nothing
+end
+
 # -----------------------------------------------------------------------------
 # Main: build ctx once, then evaluate 1..N Sunny kernels
 # -----------------------------------------------------------------------------
@@ -185,7 +279,7 @@ nωbins = parse(Int, get(ENV, "TOFTWIN_NWBINS", "240"))
 ηstride = parse(Int, get(ENV, "TOFTWIN_ETA_STRIDE", "1"))
 
 res_mode = lowercase(get(ENV, "TOFTWIN_RES_MODE", "cdf"))
-σt_us    = parse(Float64, get(ENV, "TOFTWIN_SIGMA_T_US", "100.0"))
+σt_us    = parse(Float64, get(ENV, "TOFTWIN_SIGMA_T_US", "10.0"))
 gh_order = parse(Int, get(ENV, "TOFTWIN_GH_ORDER", "3"))
 nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
 
@@ -194,9 +288,16 @@ nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
 #   TOFTWIN_SIGMA_T_SOURCE=pychop          -> derive an *effective* σt(t) curve from PyChop ΔE(ω)
 σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "pychop"))
 
+# Optional: sanity-check that the TOFtwin TOF-smearing implies a ΔE(ω) consistent
+# with the raw PyChop oracle. (Turn off with TOFTWIN_PYCHOP_CHECK=0.)
+pychop_check = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK", "1")) in ("1", "true", "yes")
+
+# If non-empty, these Etrans values (meV) are used for the check.
+# (Otherwise, TOFtwin picks a small default list and clips to valid range.)
+pychop_check_etrans_meV = Float64[]
+
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
-#pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "python"))
-pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe"))
+pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
 pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "")
 pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "")
@@ -208,8 +309,8 @@ pychop_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_NPTS", "401"))
 pychop_sigma_q = parse(Float64, get(ENV, "TOFTWIN_PYCHOP_SIGMA_Q", "0.25"))
 
 ntof_env   = get(ENV, "TOFTWIN_NTOF", "auto")
-ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "1.5"))
-ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "1.0"))
+ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "0.5"))
+ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "0.333333333333"))
 ntof_min   = parse(Int, get(ENV, "TOFTWIN_NTOF_MIN", "200"))
 ntof_max   = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "2000"))
 
@@ -241,10 +342,16 @@ ctx = step("setup_powder_ctx", () -> TOFtwin.setup_powder_ctx(;
     pychop_delta_td_us=pychop_delta_td_us,
     pychop_npts=pychop_npts,
     pychop_sigma_q=pychop_sigma_q,
+	pychop_check=pychop_check,
+	pychop_check_etrans_meV=pychop_check_etrans_meV,
     ntof_env=ntof_env, ntof_alpha=ntof_alpha, ntof_beta=ntof_beta, ntof_min=ntof_min, ntof_max=ntof_max,
     disk_cache=disk_cache, cache_dir=cache_dir, cache_ver=cache_ver,
     cache_Cv=cache_Cv, cache_rmap=cache_rmap
 ))
+
+if pychop_check_plot
+    step("plot_pychop_resolution_compare", () -> plot_pychop_resolution_compare(ctx))
+end
 
 @info "SETUP complete. ctx pixels=$(length(ctx.pixels)) grouping='$(grouping)' mask='$(mask_btp)' res_mode='$(res_mode)'"
 

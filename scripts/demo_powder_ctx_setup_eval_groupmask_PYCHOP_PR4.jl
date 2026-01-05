@@ -79,7 +79,7 @@ disk_cache && mkpath(cache_dir)
 #   TOFTWIN_MASK_BTP=""        e.g. "Bank=40-50;Mode=drop" or "DetectorList=123,124"
 #   TOFTWIN_MASK_MODE=drop|zeroΩ (used if spec omits Mode)
 #   TOFTWIN_POWDER_ANGLESTEP=0.5
-grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "8x2"))
+grouping      = strip(get(ENV, "TOFTWIN_GROUPING", "4x2"))
 grouping_file = strip(get(ENV, "TOFTWIN_GROUPING_FILE", ""))
 mask_btp      = get(ENV, "TOFTWIN_MASK_BTP", "Bank=36-50")
 mask_mode     = Symbol(lowercase(get(ENV, "TOFTWIN_MASK_MODE", "drop")))
@@ -175,7 +175,7 @@ sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_
 
 kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
 
-default_Ei = instr === :SEQUOIA ? "30.0" : "25.0"
+default_Ei = instr === :SEQUOIA ? "30.0" : "2.0"
 Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
 nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
@@ -195,8 +195,7 @@ nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
 σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "pychop"))
 
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
-#pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "python"))
-pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", "C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe"))
+pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
 pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "")
 pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "")
@@ -208,8 +207,8 @@ pychop_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_NPTS", "401"))
 pychop_sigma_q = parse(Float64, get(ENV, "TOFTWIN_PYCHOP_SIGMA_Q", "0.25"))
 
 ntof_env   = get(ENV, "TOFTWIN_NTOF", "auto")
-ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "1.5"))
-ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "1.0"))
+ntof_alpha = parse(Float64, get(ENV, "TOFTWIN_NTOF_ALPHA", "0.5"))
+ntof_beta  = parse(Float64, get(ENV, "TOFTWIN_NTOF_BETA",  "0.333333333333"))
 ntof_min   = parse(Int, get(ENV, "TOFTWIN_NTOF_MIN", "200"))
 ntof_max   = parse(Int, get(ENV, "TOFTWIN_NTOF_MAX", "2000"))
 

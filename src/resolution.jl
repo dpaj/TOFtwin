@@ -460,16 +460,60 @@ function apply_tof_resolution!(C::AbstractMatrix{Float64},
     n_tof = size(C, 2)
     (length(tof_edges_s) == n_tof + 1) || throw(ArgumentError("tof_edges_s length must be n_tof+1"))
 
+    # Row indexing convention can differ across call sites:
+    #   - some code stores rows by pixel.id (dense up to maxid),
+    #   - other code stores rows in the same order as `pixels` (1..length(pixels)).
+    #
+    # Using the wrong convention under `@inbounds` can corrupt memory and crash Julia.
+    nrow  = size(C, 1)
+    npix  = length(pixels)
+    maxpid = maximum(p.id for p in pixels)
+
+    rows_by_pid = nrow >= maxpid
+    if !rows_by_pid && nrow != npix
+        throw(ArgumentError("apply_tof_resolution!: cannot map rows: size(C,1)=$nrow, length(pixels)=$npix, max(pixel.id)=$maxpid"))
+    end
+
+    @inline row_index(pid::Int, i::Int) = rows_by_pid ? pid : i
+
     # Fast path: use precomputed work (typically pixel-independent σt(TOF) curves).
+    #
+    # `work` may be:
+    #   - a single `TofSmearWork` (shared by all pixels), or
+    #   - a vector of `TofSmearWork` indexed by `pixel.id` *or* by pixel order.
     if work !== nothing
-        work isa TofSmearWork || throw(ArgumentError("work must be a TofSmearWork or nothing"))
         tmp = Vector{Float64}(undef, n_tof)
-        @inbounds for p in pixels
-            row = view(C, p.id, :)
-            _apply_tof_smear_work!(tmp, row, work)
-            copyto!(row, tmp)
+
+        if work isa TofSmearWork
+            @inbounds for (i, p) in enumerate(pixels)
+                ridx = row_index(Int(p.id), i)
+                row = view(C, ridx, :)
+                _apply_tof_smear_work!(tmp, row, work)
+                copyto!(row, tmp)
+            end
+            return C
+
+        elseif work isa AbstractVector
+            nwork = length(work)
+            work_by_pid = nwork >= maxpid
+            if !work_by_pid && nwork != npix
+                throw(ArgumentError("apply_tof_resolution!: cannot map work vector: length(work)=$nwork, length(pixels)=$npix, max(pixel.id)=$maxpid"))
+            end
+
+            @inbounds for (i, p) in enumerate(pixels)
+                pid = Int(p.id)
+                ridx = row_index(pid, i)
+                w = work_by_pid ? work[pid] : work[i]
+                w isa TofSmearWork || throw(ArgumentError("work entry must be a TofSmearWork (got $(typeof(w)))"))
+                row = view(C, ridx, :)
+                _apply_tof_smear_work!(tmp, row, w)
+                copyto!(row, tmp)
+            end
+            return C
+
+        else
+            throw(ArgumentError("work must be a TofSmearWork, a vector of TofSmearWork, or nothing"))
         end
-        return C
     end
 
     uniform = _is_uniform_edges(tof_edges_s)
@@ -482,8 +526,9 @@ function apply_tof_resolution!(C::AbstractMatrix{Float64},
     if res.σt isa AbstractVector
         work_local = precompute_tof_smear_work(inst, pixels, Ei_meV, tof_edges_s, res)
         work_local === nothing && throw(ArgumentError("σt is a vector but precompute_tof_smear_work returned nothing"))
-        @inbounds for p in pixels
-            row = view(C, p.id, :)
+        @inbounds for (i, p) in enumerate(pixels)
+            ridx = row_index(Int(p.id), i)
+            row = view(C, ridx, :)
             _apply_tof_smear_work!(tmp, row, work_local)
             copyto!(row, tmp)
         end
@@ -491,9 +536,10 @@ function apply_tof_resolution!(C::AbstractMatrix{Float64},
     end
 
     # Otherwise, fall back to the scalar σt behavior (constant or callable evaluated at a representative t).
-    @inbounds for p in pixels
+    @inbounds for (i, p) in enumerate(pixels)
+        ridx = row_index(Int(p.id), i)
         σ = _σt(res, inst, p, Ei_meV, t_rep)
-        row = view(C, p.id, :)
+        row = view(C, ridx, :)
         if uniform
             _smear_row_gaussian_cdf_uniform!(tmp, row, dt, σ, res.nsigma)
         else
@@ -504,3 +550,4 @@ function apply_tof_resolution!(C::AbstractMatrix{Float64},
 
     return C
 end
+

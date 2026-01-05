@@ -10,6 +10,22 @@ using Serialization
 using SHA
 
 # -----------------------------
+# Stable hash helper (for disk-cache keys)
+# -----------------------------
+# NOTE: Base.hash is randomized per session; we need a stable digest.
+# For strings: hash codeunits. For other objects: serialize then hash bytes.
+
+function _wf_hash(s::AbstractString)
+    return bytes2hex(sha1(codeunits(s)))
+end
+
+function _wf_hash(x)
+    io = IOBuffer()
+    serialize(io, x)
+    return bytes2hex(sha1(take!(io)))
+end
+
+# -----------------------------
 # Small cache helpers (Serialization-based)
 # -----------------------------
 
@@ -17,8 +33,19 @@ using SHA
 # Prefer keeping large precomputes in RAM for multi-model sweeps.
 # This helper exists mainly so demos/analysis can opt-in if desired.
 
+# Sanitize filename pieces (Windows forbids <>:"/\\|?*)
+_wf_safe_filename(s::AbstractString) = replace(String(s), r"[<>:\"/\\\\|?*]" => "_")
+
 function _wf_cache_path(cache_dir::AbstractString, prefix::AbstractString, bytes::Vector{UInt8})
-    return joinpath(cache_dir, prefix * "_" * bytes2hex(sha1(bytes)) * ".jls")
+    p = _wf_safe_filename(prefix)
+    return joinpath(cache_dir, p * "_" * bytes2hex(sha1(bytes)) * ".jls")
+end
+
+# Convenience overload: build cache path from structured parts.
+# We hash the serialized tuple via _wf_hash so the key is stable across sessions.
+function _wf_cache_path(cache_dir::AbstractString, prefix::AbstractString; parts=())
+    p = _wf_safe_filename(prefix)
+    return joinpath(cache_dir, p * "_" * _wf_hash(parts) * ".jls")
 end
 
 function _wf_load_or_compute(path::AbstractString, builder::Function; disk_cache::Bool=true)

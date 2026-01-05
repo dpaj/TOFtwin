@@ -401,7 +401,7 @@ def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     p.add_argument("--inst", type=str, default="CNCS", help="Instrument name for PyChop (e.g. CNCS).")
-    p.add_argument("--Ei", type=float, default=6.59, help="Incident energy [meV].")
+    p.add_argument("--Ei", type=float, default=12.0, help="Incident energy [meV].")
 
     # Etrans grid
     p.add_argument("--E", type=float, default=3.0, help="Single energy transfer [meV] for ΔQ calcs.")
