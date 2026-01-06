@@ -245,15 +245,32 @@ function sigma_t_work_from_pychop(
 
     σt_ref = sigma_t_bins_for_L2(L2_ref)
 
+    pychop_spec = (
+        instrument = instrument,
+        Ei_meV = Ei_meV,
+        variant = String(variant),
+        freq_hz = Vector{Float64}(float.(freq_hz)),
+        tc_index = tc_index,
+        use_tc_rss = use_tc_rss,
+        delta_td_us = delta_td_us,
+        etrans_min = etrans_min,
+        etrans_max = etrans_max,
+        npts = npts,
+        sigma_q = sigma_q,
+        l2_bucket_m = l2_bucket_m,
+        python = String(python),
+        script = String(script),
+    )
+
     meta = (
-        etrans=etrans,
+        pychop_spec = pychop_spec,
+        etrans = etrans,
         etrans_meV = etrans,
-        dE_fwhm=dE_fwhm,
-        L2_ref=L2_ref,
-        l2_bucket_m=l2_bucket_m,
-        nbuckets=length(work_cache),
-        python=String(python),
-        script=String(script),
+        dE_fwhm = dE_fwhm,
+        dE_fwhm_meV = dE_fwhm,
+        L2_ref = L2_ref,
+        l2_bucket_m = l2_bucket_m,
+        nbuckets = length(work_cache),
     )
 
     return σt_ref, work_by_id, meta
@@ -507,6 +524,7 @@ struct PowderCtx
 
     resolution::AbstractResolutionModel
     cdf_work::Any              # nothing | TofSmearWork | Vector{TofSmearWork} (by pixel id)
+    pychop_spec::Any          # nothing | NamedTuple (PyChop model spec) for reproducibility
 
     Cv::Any                    # cached vanadium (pixel×TOF) response (flat kernel)
     rmap::Any                  # cached reduction map
@@ -660,6 +678,7 @@ function setup_powder_ctx(;
         throw(ArgumentError("res_mode must be none|gh|cdf (got '$res_mode')"))
 
     cdf_work = nothing
+    pychop_spec = nothing  # filled when σt_source='pychop'
     # If CDF mode: precompute (either uniform σt or group-aware σt(t) from PyChop)
     if resolution isa GaussianTimingCDFResolution
         if σt_source_s == "env"
@@ -686,6 +705,7 @@ function setup_powder_ctx(;
                 cache_tag="powder|" * cache_ver,
             )
             cdf_work = work_by_id
+            pychop_spec = hasproperty(meta_pychop, :pychop_spec) ? meta_pychop.pychop_spec : nothing
 
             if pychop_check
                 try
@@ -708,8 +728,35 @@ function setup_powder_ctx(;
     Cv = nothing
     if disk_cache && cache_Cv
         # Keep cache filenames portable on Windows (no '|').
+        py_key = σt_source_s == "pychop" ? (
+            "py_variant=$(pychop_variant)",
+            "py_freq=$(join(string.(float.(pychop_freq_hz)), ","))",
+            "py_tci=$(pychop_tc_index)",
+            "py_rss=$(pychop_use_tc_rss ? 1 : 0)",
+            "py_dtd=$(pychop_delta_td_us)",
+            "py_npts=$(pychop_npts)",
+            "py_l2b=$(pychop_l2_bucket_m)",
+            "py_sigma_q=$(pychop_sigma_q)",
+        ) : (
+            "pychop=none",
+        )
+
         Cv_path = _wf_cache_path(cache_dir, "Cv_flat_" * String(instr) * "_" * cache_ver;
-            parts=("Ei=$(Ei_meV)", "ntof=$(ntof)", "res=$(typeof(resolution))")
+            parts=(
+                "idf=$(idf_path)",
+                "Ei=$(Ei_meV)",
+                "ntof=$(ntof)",
+                "res_mode=$(res_mode_s)",
+                "σt_source=$(σt_source_s)",
+                "σt_us=$(σt_us)",
+                "gh_order=$(gh_order)",
+                "nsigma=$(nsigma)",
+                "grouping=$(grouping)",
+                "mask=$(mask_btp)",
+                "ψstride=$(ψstride)",
+                "ηstride=$(ηstride)",
+                py_key...,
+            )
         )
         Cv = _wf_load_or_compute(Cv_path, () -> begin
             predict_pixel_tof(inst;
@@ -736,7 +783,7 @@ function setup_powder_ctx(;
     return PowderCtx(
         instr, idf_path, inst, pix,
         Ei_meV, tof_edges_s, Q_edges, ω_edges,
-        resolution, cdf_work,
+        resolution, cdf_work, pychop_spec,
         Cv, rmap,
         disk_cache, String(cache_dir)
     )

@@ -21,6 +21,34 @@ import numpy as np
 
 
 # ----------------------------
+# Small parsing helper
+# ----------------------------
+def parse_float_list(tokens: Optional[Sequence[str]]) -> Optional[list[float]]:
+    """Parse CLI tokens into a list of floats.
+
+    Accepts:
+      --freq 300 60
+      --freq 300,60
+      --freq 300, 60
+      --freq 300;60
+    """
+    if tokens is None:
+        return None
+    out: list[float] = []
+    for tok in tokens:
+        if tok is None:
+            continue
+        # Split on commas/semicolons; argparse already splits on whitespace.
+        for part in str(tok).replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            out.append(float(part))
+    return out if out else None
+
+
+
+# ----------------------------
 # Physical constants (SI)
 # ----------------------------
 m_n = 1.67492749804e-27          # neutron mass [kg]
@@ -297,6 +325,13 @@ def safe_call_set_frequency(inst: Any, freq: Union[float, Sequence[float]]) -> N
         inst.setFrequency(freq)
         return
     except Exception:
+        # Some APIs want multiple positional args
+        try:
+            if isinstance(freq, (list, tuple, np.ndarray)) and not isinstance(freq, (str, bytes)):
+                inst.setFrequency(*freq)
+                return
+        except Exception:
+            pass
         pass
     # As a last resort, set attribute
     try:
@@ -324,12 +359,42 @@ def get_width2_list(x: Any) -> np.ndarray:
         return np.array([float(x)], dtype=float)
 
 
+def compute_instrument_dE_meV(inst: Any, Ei_meV: float, etrans_meV: np.ndarray) -> Optional[np.ndarray]:
+    """Compute dE(etrans) using the *Instrument* object if it provides getResolution.
+
+    This is preferred because it uses the same object you've already configured with
+    setChopper/setFrequency (so variant changes are guaranteed to apply).
+    """
+    # Ensure Ei is set if the API requires it.
+    if hasattr(inst, "setEi"):
+        try:
+            inst.setEi(Ei_meV)
+        except Exception:
+            pass
+
+    # Try a few plausible method names/signatures.
+    for m in ("getResolution", "getResolutions", "resolution"):
+        if not hasattr(inst, m):
+            continue
+        meth = getattr(inst, m)
+        # Common calling conventions:
+        for args in ((etrans_meV,), (Ei_meV, etrans_meV)):
+            try:
+                out = meth(*args)
+                return np.asarray(out, dtype=float).ravel()
+            except Exception:
+                pass
+    return None
+
+
+
 def compute_pychop_dE_meV(
     inst_name: str,
     variant: Optional[str],
     freq: Optional[Union[float, Sequence[float]]],
     Ei_meV: float,
     etrans_meV: np.ndarray,
+    prefer_oo: bool = True,
 ) -> Optional[np.ndarray]:
     """
     Compute PyChop ΔE(etrans) in meV using PyChop2 if available.
@@ -342,18 +407,22 @@ def compute_pychop_dE_meV(
     if PyChop2 is None:
         return None
 
-    # 1) Try the Mantid-documented static calculate() interface.
-    if hasattr(PyChop2, "calculate"):
-        try:
-            res, flux = PyChop2.calculate(inst=inst_name.lower(), chtyp=variant, freq=freq, ei=Ei_meV, etrans=etrans_meV)
-            return np.asarray(res, dtype=float)
-        except Exception:
+    # 1) Optionally try the Mantid-documented static calculate() interface.
+    # NOTE: Some environments appear to ignore the chopper 'variant' for calculate();
+    # we therefore prefer OO configuration by default.
+    if not prefer_oo:
+        # 1) Try the Mantid-documented static calculate() interface.
+        if hasattr(PyChop2, "calculate"):
             try:
-                res, flux = PyChop2.calculate(inst=inst_name, chtyp=variant, freq=freq, ei=Ei_meV, etrans=etrans_meV)
+                res, flux = PyChop2.calculate(inst=inst_name.lower(), chtyp=variant, freq=freq, ei=Ei_meV, etrans=etrans_meV)
                 return np.asarray(res, dtype=float)
             except Exception:
-                pass
-
+                try:
+                    res, flux = PyChop2.calculate(inst=inst_name, chtyp=variant, freq=freq, ei=Ei_meV, etrans=etrans_meV)
+                    return np.asarray(res, dtype=float)
+                except Exception:
+                    pass
+    
     # 2) Try OO interface.
     try:
         obj = PyChop2(inst_name.lower())
@@ -415,7 +484,9 @@ def parse_args():
 
     # CNCS settings
     p.add_argument("--variant", type=str, default=None, help="Chopper opening/variant name (PyChop 'variant').")
-    p.add_argument("--freq", type=float, nargs="*", default=None, help="Chopper frequency/frequencies [Hz].")
+    p.add_argument("--freq", type=str, nargs="*", default=None, help="Chopper frequency/frequencies [Hz]. Accepts e.g. --freq 300 60 or --freq 300,60.")
+    p.add_argument("--dE-source", type=str, default="auto", choices=("auto","instrument","pychop2"),
+                   help="How to compute dE_pychop: try Instrument.getResolution, PyChop2, or auto (instrument then PyChop2).")
 
     # timing extraction / scaling
     p.add_argument("--tc-index", type=int, default=0, help="Which element of chopper_system.getWidthSquared(Ei) to treat as δt_c^2.")
@@ -454,9 +525,12 @@ def main() -> int:
     if args.variant is not None:
         safe_call_set_chopper(inst, args.variant)
 
-    if args.freq is not None and len(args.freq) > 0:
-        f: Union[float, Sequence[float]] = args.freq[0] if len(args.freq) == 1 else args.freq
-        safe_call_set_frequency(inst, f)
+    # Parse frequency tokens into float(s)
+    freq_val: Optional[Union[float, Sequence[float]]] = None
+    freq_list = parse_float_list(args.freq)
+    if freq_list is not None and len(freq_list) > 0:
+        freq_val = freq_list[0] if len(freq_list) == 1 else freq_list
+        safe_call_set_frequency(inst, freq_val)
 
     Ei = float(args.Ei)
 
@@ -500,11 +574,17 @@ def main() -> int:
     dE_exp = energy_resolution_explicit_meV(Ei, etrans, L1, L2, L3, delta_tp, delta_tc, delta_td)
 
     # Compute PyChop ΔE(etrans) if possible
-    f_for_pychop: Optional[Union[float, Sequence[float]]] = None
-    if args.freq is not None and len(args.freq) > 0:
-        f_for_pychop = args.freq[0] if len(args.freq) == 1 else args.freq
-
-    dE_pychop = compute_pychop_dE_meV(args.inst, args.variant, f_for_pychop, Ei, etrans)
+    # Compute PyChop ΔE(etrans)
+    dE_pychop_source = None
+    dE_pychop = None
+    if args.dE_source in ("auto", "instrument"):
+        dE_pychop = compute_instrument_dE_meV(inst, Ei, etrans)
+        if dE_pychop is not None:
+            dE_pychop_source = "Instrument.getResolution"
+    if dE_pychop is None and args.dE_source in ("auto", "pychop2"):
+        dE_pychop = compute_pychop_dE_meV(args.inst, args.variant, freq_val, Ei, etrans, prefer_oo=True)
+        if dE_pychop is not None:
+            dE_pychop_source = "PyChop2 (OO)"
 
     # Single-point ΔQ comparison at (E, Q)
     E_single = float(args.E)
@@ -524,7 +604,8 @@ def main() -> int:
     print(f"Instrument: {args.inst}")
     print(f"Ei [meV]:    {Ei}")
     print(f"variant:     {args.variant}")
-    print(f"freq [Hz]:   {args.freq}")
+    print(f"freq [Hz]:   {freq_list}")
+    print(f"dE source:   {dE_pychop_source}")
     print("")
     print("---- Distances ----")
     print(f"x0={x0:.6g}  xa={xa:.6g}  x1={x1:.6g}  x2={x2:.6g}  xm={xm:.6g}  [m]")
