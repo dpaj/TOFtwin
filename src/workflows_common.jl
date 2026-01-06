@@ -25,6 +25,14 @@ function _wf_hash(x)
     return bytes2hex(sha1(take!(io)))
 end
 
+# Stable SHA1 digest of a file's *contents* (useful for cache invalidation when
+# helper scripts change, e.g. the PyChop oracle).
+function _wf_file_sha1(path::AbstractString)
+    open(path, "r") do io
+        return bytes2hex(sha1(read(io)))
+    end
+end
+
 # -----------------------------
 # Small cache helpers (Serialization-based)
 # -----------------------------

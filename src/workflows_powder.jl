@@ -57,6 +57,75 @@ Runs `pychop_oracle_dE.py` and returns (etrans_meV::Vector{Float64}, dE_fwhm_meV
 
 - dE is FWHM in energy transfer, as reported by the oracle (PyChop).
 """
+
+# --- Parse PyChop oracle header lines (# ...) into a compact "effective" summary.
+# The python oracle may emit multiple "# key=value ..." lines; we keep them verbatim
+# and also parse a few commonly-used fields for sanity checks.
+function _parse_pychop_oracle_headers(hdr::Vector{String})
+    backend = nothing
+    inst_variant = nothing
+    dtm2_s2 = nothing
+    dtc2_s2 = nothing
+    freq_hz = nothing
+    distances = nothing
+
+    for ln in hdr
+        s = strip(ln)
+        startswith(s, "#") && (s = strip(s[2:end]))
+
+        if backend === nothing
+            m = match(r"backend=([^\s]+)", s)
+            m !== nothing && (backend = m.captures[1])
+        end
+        if inst_variant === nothing
+            m = match(r"inst\.variant\s*=\s*['\"]([^'\"]+)['\"]", s)
+            m !== nothing && (inst_variant = m.captures[1])
+        end
+        if dtm2_s2 === nothing
+            m = match(r"dtm2_s2=([0-9eE\+\-\.]+)", s)
+            m !== nothing && (dtm2_s2 = parse(Float64, m.captures[1]))
+        end
+        if dtc2_s2 === nothing
+            m = match(r"dtc2_s2=\[([^\]]+)\]", s)
+            if m !== nothing
+                parts = split(m.captures[1], ",")
+                dtc2_s2 = [parse(Float64, strip(p)) for p in parts if !isempty(strip(p))]
+            end
+        end
+        if freq_hz === nothing
+            m = match(r"freq_hz=\[([^\]]+)\]", s)
+            if m !== nothing
+                parts = split(m.captures[1], ",")
+                freq_hz = [parse(Float64, strip(p)) for p in parts if !isempty(strip(p))]
+            end
+        end
+        if distances === nothing && occursin("distances_m", s)
+            mx0 = match(r"x0=([0-9eE\+\-\.]+)", s)
+            mxm = match(r"xm=([0-9eE\+\-\.]+)", s)
+            mx1 = match(r"x1=([0-9eE\+\-\.]+)", s)
+            mx2 = match(r"x2=([0-9eE\+\-\.]+)", s)
+            mxa = match(r"xa=([0-9eE\+\-\.]+)", s)
+            if mx0 !== nothing && mxm !== nothing
+                x0 = parse(Float64, mx0.captures[1])
+                xm = parse(Float64, mxm.captures[1])
+                x1 = mx1 === nothing ? nothing : parse(Float64, mx1.captures[1])
+                x2 = mx2 === nothing ? nothing : parse(Float64, mx2.captures[1])
+                xa = mxa === nothing ? nothing : parse(Float64, mxa.captures[1])
+                distances = (x0=x0, xm=xm, x1=x1, x2=x2, xa=xa)
+            end
+        end
+    end
+
+    return (
+        backend = backend,
+        inst_variant = inst_variant,
+        dtm2_s2 = dtm2_s2,
+        dtc2_s2 = dtc2_s2,
+        freq_hz = freq_hz,
+        distances = distances,
+    )
+end
+
 function _run_pychop_oracle_dE(;
     python::AbstractString,
     script::AbstractString,
@@ -70,7 +139,9 @@ function _run_pychop_oracle_dE(;
     etrans_min::Float64,
     etrans_max::Float64,
     npts::Int,
+    return_meta::Bool=false,
 )
+
     # Write JSON to a temp file (avoid command-length problems)
     tmp = tempname() * ".json"
     open(tmp, "w") do io
@@ -94,12 +165,13 @@ function _run_pychop_oracle_dE(;
     run(cmd)
 
     # Parse whitespace-separated columns: etrans  dE_FWHM
+    hdr = String[]
     et = Float64[]
     dE = Float64[]
     for ln in eachline(out)
         s = strip(ln)
         isempty(s) && continue
-        startswith(s, "#") && continue
+        startswith(s, "#") && (push!(hdr, s); continue)
         parts = split(s)
         length(parts) < 2 && continue
         push!(et, parse(Float64, parts[1]))
@@ -110,6 +182,10 @@ function _run_pychop_oracle_dE(;
 
     if isempty(et)
         error("PyChop oracle returned no points (instrument=$(instrument), Ei=$(Ei_meV)).")
+    end
+    if return_meta
+        eff = _parse_pychop_oracle_headers(hdr)
+        return (etrans=et, dE_fwhm=dE, headers=hdr, effective=eff)
     end
     return et, dE
 end
@@ -173,10 +249,11 @@ function sigma_t_work_from_pychop(
             "emax=$(etrans_max)",
             "sigma_q=$(sigma_q)",
             "npts=$(npts)",
+            "meta=1",
         )
     )
 
-    etrans, dE_fwhm = _wf_load_or_compute(curve_path, () -> begin
+    curve = _wf_load_or_compute(curve_path, () -> begin
         _run_pychop_oracle_dE(
             python=python,
             script=script,
@@ -190,8 +267,23 @@ function sigma_t_work_from_pychop(
             etrans_min=etrans_min,
             etrans_max=etrans_max,
             npts=npts,
+            return_meta=true,
         )
     end; disk_cache=disk_cache)
+
+    # Back-compat: older caches stored (etrans, dE_fwhm) as a Tuple.
+    py_hdr = String[]
+    py_eff = nothing
+    if curve isa NamedTuple && hasproperty(curve, :etrans)
+        etrans = curve.etrans
+        dE_fwhm = curve.dE_fwhm
+        py_hdr = hasproperty(curve, :headers) ? curve.headers : String[]
+        py_eff = hasproperty(curve, :effective) ? curve.effective : nothing
+    elseif curve isa Tuple && length(curve) >= 2
+        etrans, dE_fwhm = curve
+    else
+        error("Unexpected cached PyChop curve type: $(typeof(curve))")
+    end
 
     etrans = Vector{Float64}(etrans)
     dE_fwhm = Vector{Float64}(dE_fwhm)
@@ -245,32 +337,15 @@ function sigma_t_work_from_pychop(
 
     σt_ref = sigma_t_bins_for_L2(L2_ref)
 
-    pychop_spec = (
-        instrument = instrument,
-        Ei_meV = Ei_meV,
-        variant = String(variant),
-        freq_hz = Vector{Float64}(float.(freq_hz)),
-        tc_index = tc_index,
-        use_tc_rss = use_tc_rss,
-        delta_td_us = delta_td_us,
-        etrans_min = etrans_min,
-        etrans_max = etrans_max,
-        npts = npts,
-        sigma_q = sigma_q,
-        l2_bucket_m = l2_bucket_m,
-        python = String(python),
-        script = String(script),
-    )
-
     meta = (
-        pychop_spec = pychop_spec,
-        etrans = etrans,
+        etrans=etrans,
         etrans_meV = etrans,
-        dE_fwhm = dE_fwhm,
-        dE_fwhm_meV = dE_fwhm,
-        L2_ref = L2_ref,
-        l2_bucket_m = l2_bucket_m,
-        nbuckets = length(work_cache),
+        dE_fwhm=dE_fwhm,
+        L2_ref=L2_ref,
+        l2_bucket_m=l2_bucket_m,
+        nbuckets=length(work_cache),
+        python=String(python),
+        script=String(script),
     )
 
     return σt_ref, work_by_id, meta
@@ -524,7 +599,6 @@ struct PowderCtx
 
     resolution::AbstractResolutionModel
     cdf_work::Any              # nothing | TofSmearWork | Vector{TofSmearWork} (by pixel id)
-    pychop_spec::Any          # nothing | NamedTuple (PyChop model spec) for reproducibility
 
     Cv::Any                    # cached vanadium (pixel×TOF) response (flat kernel)
     rmap::Any                  # cached reduction map
@@ -678,7 +752,6 @@ function setup_powder_ctx(;
         throw(ArgumentError("res_mode must be none|gh|cdf (got '$res_mode')"))
 
     cdf_work = nothing
-    pychop_spec = nothing  # filled when σt_source='pychop'
     # If CDF mode: precompute (either uniform σt or group-aware σt(t) from PyChop)
     if resolution isa GaussianTimingCDFResolution
         if σt_source_s == "env"
@@ -705,7 +778,6 @@ function setup_powder_ctx(;
                 cache_tag="powder|" * cache_ver,
             )
             cdf_work = work_by_id
-            pychop_spec = hasproperty(meta_pychop, :pychop_spec) ? meta_pychop.pychop_spec : nothing
 
             if pychop_check
                 try
@@ -728,35 +800,8 @@ function setup_powder_ctx(;
     Cv = nothing
     if disk_cache && cache_Cv
         # Keep cache filenames portable on Windows (no '|').
-        py_key = σt_source_s == "pychop" ? (
-            "py_variant=$(pychop_variant)",
-            "py_freq=$(join(string.(float.(pychop_freq_hz)), ","))",
-            "py_tci=$(pychop_tc_index)",
-            "py_rss=$(pychop_use_tc_rss ? 1 : 0)",
-            "py_dtd=$(pychop_delta_td_us)",
-            "py_npts=$(pychop_npts)",
-            "py_l2b=$(pychop_l2_bucket_m)",
-            "py_sigma_q=$(pychop_sigma_q)",
-        ) : (
-            "pychop=none",
-        )
-
         Cv_path = _wf_cache_path(cache_dir, "Cv_flat_" * String(instr) * "_" * cache_ver;
-            parts=(
-                "idf=$(idf_path)",
-                "Ei=$(Ei_meV)",
-                "ntof=$(ntof)",
-                "res_mode=$(res_mode_s)",
-                "σt_source=$(σt_source_s)",
-                "σt_us=$(σt_us)",
-                "gh_order=$(gh_order)",
-                "nsigma=$(nsigma)",
-                "grouping=$(grouping)",
-                "mask=$(mask_btp)",
-                "ψstride=$(ψstride)",
-                "ηstride=$(ηstride)",
-                py_key...,
-            )
+            parts=("Ei=$(Ei_meV)", "ntof=$(ntof)", "res=$(typeof(resolution))")
         )
         Cv = _wf_load_or_compute(Cv_path, () -> begin
             predict_pixel_tof(inst;
@@ -783,7 +828,7 @@ function setup_powder_ctx(;
     return PowderCtx(
         instr, idf_path, inst, pix,
         Ei_meV, tof_edges_s, Q_edges, ω_edges,
-        resolution, cdf_work, pychop_spec,
+        resolution, cdf_work,
         Cv, rmap,
         disk_cache, String(cache_dir)
     )

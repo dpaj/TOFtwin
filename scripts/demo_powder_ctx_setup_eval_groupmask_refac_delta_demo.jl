@@ -106,7 +106,47 @@ function load_sunny_powder_jld2(path::AbstractString; outside=0.0)
     @assert size(S) == (length(Q), length(W))
 
     return TOFtwin.GridKernelPowder(Q, W, S; outside=outside)
+
 end
+
+# -----------------------------
+# Artificial "delta-comb" kernel (no Sunny)
+#
+# Idea: a regular grid of peaks spaced by:
+#   ΔQ = 0.5 Å⁻¹,  Δω = 0.5 meV
+#
+# Because eval_powder samples a continuous model, true Dirac deltas would be
+# missed. We approximate deltas with narrow Gaussians in Q and ω.
+#
+# Env knobs:
+#   TOFTWIN_KERNEL=delta|sunny
+#   TOFTWIN_KERN_QMIN, TOFTWIN_KERN_QMAX
+#   TOFTWIN_KERN_WMIN, TOFTWIN_KERN_WMAX
+#   TOFTWIN_DELTA_DQ, TOFTWIN_DELTA_DW
+#   TOFTWIN_DELTA_SIGMA_Q, TOFTWIN_DELTA_SIGMA_W
+#   TOFTWIN_DELTA_FINE_DQ,  TOFTWIN_DELTA_FINE_DW
+#   TOFTWIN_DELTA_AMP
+# -----------------------------
+
+function _delta_comb_value(q, w; dQ=0.5, dW=0.5, σQ=0.03, σW=0.03, amp=1.0)
+    (q < 0 || w < 0) && return 0.0
+    dq = abs(q - round(q/dQ) * dQ)
+    dw = abs(w - round(w/dW) * dW)
+    return amp * exp(-0.5*(dq/σQ)^2 - 0.5*(dw/σW)^2)
+end
+
+function make_delta_comb_kernel(; Qmin::Real=0.0, Qmax::Real=6.0, wmin::Real=0.0, wmax::Real=25.0,
+                                dQ::Real=0.5, dW::Real=0.5, σQ::Real=0.03, σW::Real=0.03,
+                                fine_dQ::Real=0.05, fine_dW::Real=0.05, amp::Real=1.0,
+                                outside::Real=0.0)
+    Q = collect(range(Float64(Qmin), Float64(Qmax); step=Float64(fine_dQ)))
+    W = collect(range(Float64(wmin), Float64(wmax); step=Float64(fine_dW)))
+    S = [ _delta_comb_value(q, w; dQ=dQ, dW=dW, σQ=σQ, σW=σW, amp=amp) for q in Q, w in W ]
+    return TOFtwin.GridKernelPowder(Q, W, S; outside=outside)
+end
+
+
+
 
 # -----------------------------
 # Instrument selection
@@ -136,7 +176,7 @@ function plot_result(ctx::TOFtwin.PowderCtx, kern::TOFtwin.GridKernelPowder, pre
         fig = Figure(size=(1400, 900))
 
         if plot_kernel
-            ax1 = Axis(fig[1,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="Sunny kernel S(|Q|,ω)")
+            ax1 = Axis(fig[1,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="Kernel S(|Q|,ω)")
             heatmap!(ax1, Q_cent, ω_cent, kernel_grid)
         else
             ax1 = Axis(fig[1,1], xlabel="|Q| (Å⁻¹)", ylabel="ω (meV)", title="(kernel plot disabled)")
@@ -168,7 +208,7 @@ end
 # Optional: plot PyChop vs TOFtwin-implied ΔE(ω)
 # -----------------------------
 
-const pychop_check_plot = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT", "1")) in ("1","true","yes")
+const pychop_check_plot = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT", "0")) in ("1","true","yes")
 const pychop_check_plot_npts = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPTS", "121"))
 const pychop_check_plot_npix = parse(Int, get(ENV, "TOFTWIN_PYCHOP_CHECK_PLOT_NPIX", "3"))
 
@@ -261,19 +301,70 @@ end
 # -----------------------------------------------------------------------------
 # Main: build ctx once, then evaluate 1..N Sunny kernels
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Main: build ctx once, then evaluate either:
+#   - 1..N Sunny kernels from JLD2 files (TOFTWIN_KERNEL=sunny; default), or
+#   - an artificial "delta-comb" kernel (TOFTWIN_KERNEL=delta)
+#
+# Examples:
+#   # Sunny (unchanged behavior)
+#   TOFTWIN_INSTRUMENT=CNCS julia --project=. scripts/demo_powder_ctx_setup_eval_groupmask_refac_delta_demo.jl \
+#       ../sunny_powder_corh2o4.jld2
+#
+#   # Artificial delta-comb: peaks every 0.5 Å^-1 and 0.5 meV
+#   TOFTWIN_INSTRUMENT=CNCS TOFTWIN_KERNEL=delta TOFTWIN_EI=25.0 \
+#       julia --project=. scripts/demo_powder_ctx_setup_eval_groupmask_refac_delta_demo.jl
+#
+#   # Make spikes sharper/broader
+#   TOFTWIN_KERNEL=delta TOFTWIN_DELTA_SIGMA_Q=0.02 TOFTWIN_DELTA_SIGMA_W=0.02 ...
+# -----------------------------------------------------------------------------
+
+kernel_kind = lowercase(strip(get(ENV, "TOFTWIN_KERNEL", "sunny")))
+
 instr = parse_instrument()
 idf_path = instr === :CNCS ? joinpath(@__DIR__, "CNCS_Definition_2025B.xml") :
                             joinpath(@__DIR__, "SEQUOIA_Definition.xml")
 
-sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_corh2o4.jld2")]
-
-kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
-
-default_Ei = instr === :SEQUOIA ? "30.0" : "25.0"
+default_Ei = instr === :SEQUOIA ? "30.0" : "12.0"
 Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
-nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
-nωbins = parse(Int, get(ENV, "TOFTWIN_NWBINS", "240"))
+# Choose kernel (only used to set ctx axes + optional plotting)
+sunny_paths = String[]
+kern0 = nothing
+
+if kernel_kind == "sunny"
+    sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_corh2o4.jld2")]
+    kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
+elseif kernel_kind in ("delta", "comb", "delta-comb", "deltacomb")
+    Qmin = parse(Float64, get(ENV, "TOFTWIN_KERN_QMIN", "0.0"))
+    Qmax = parse(Float64, get(ENV, "TOFTWIN_KERN_QMAX", "6.0"))
+    wmin = parse(Float64, get(ENV, "TOFTWIN_KERN_WMIN", "0.0"))
+    wmax = parse(Float64, get(ENV, "TOFTWIN_KERN_WMAX", string(Ei)))
+
+    dQ  = parse(Float64, get(ENV, "TOFTWIN_DELTA_DQ", "0.5"))
+    dW  = parse(Float64, get(ENV, "TOFTWIN_DELTA_DW", "1.0"))
+    σQ  = parse(Float64, get(ENV, "TOFTWIN_DELTA_SIGMA_Q", "0.03"))
+    σW  = parse(Float64, get(ENV, "TOFTWIN_DELTA_SIGMA_W", "0.03"))
+    fdQ = parse(Float64, get(ENV, "TOFTWIN_DELTA_FINE_DQ", "0.025"))
+    fdW = parse(Float64, get(ENV, "TOFTWIN_DELTA_FINE_DW", "0.05"))
+    amp = parse(Float64, get(ENV, "TOFTWIN_DELTA_AMP", "1.0"))
+
+    @info "Using artificial delta-comb kernel" Qmin=Qmin Qmax=Qmax wmin=wmin wmax=wmax dQ=dQ dW=dW σQ=σQ σW=σW fine_dQ=fdQ fine_dW=fdW amp=amp
+    kern0 = step("build artificial kernel (axes anchor)", () -> make_delta_comb_kernel(
+        Qmin=Qmin, Qmax=Qmax, wmin=wmin, wmax=wmax,
+        dQ=dQ, dW=dW, σQ=σQ, σW=σW,
+        fine_dQ=fdQ, fine_dW=fdW,
+        amp=amp, outside=0.0
+    ))
+else
+    throw(ArgumentError("TOFTWIN_KERNEL must be 'sunny' or 'delta' (got '$kernel_kind')"))
+end
+
+# -----------------------------
+# Binning / resolution knobs
+# -----------------------------
+nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "420"))
+nωbins = parse(Int, get(ENV, "TOFTWIN_NWBINS", "440"))
 
 ψstride = parse(Int, get(ENV, "TOFTWIN_PSI_STRIDE", "1"))
 ηstride = parse(Int, get(ENV, "TOFTWIN_ETA_STRIDE", "1"))
@@ -284,23 +375,18 @@ gh_order = parse(Int, get(ENV, "TOFTWIN_GH_ORDER", "3"))
 nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
 
 # Timing width source:
-#   TOFTWIN_SIGMA_T_SOURCE=manual (default) -> use TOFTWIN_SIGMA_T_US
-#   TOFTWIN_SIGMA_T_SOURCE=pychop          -> derive an *effective* σt(t) curve from PyChop ΔE(ω)
+#   TOFTWIN_SIGMA_T_SOURCE=manual -> use TOFTWIN_SIGMA_T_US
+#   TOFTWIN_SIGMA_T_SOURCE=pychop -> derive an *effective* σt(t) curve from PyChop ΔE(ω)
 σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "pychop"))
 
-# Optional: sanity-check that the TOFtwin TOF-smearing implies a ΔE(ω) consistent
-# with the raw PyChop oracle. (Turn off with TOFTWIN_PYCHOP_CHECK=0.)
 pychop_check = lowercase(get(ENV, "TOFTWIN_PYCHOP_CHECK", "1")) in ("1", "true", "yes")
-
-# If non-empty, these Etrans values (meV) are used for the check.
-# (Otherwise, TOFtwin picks a small default list and clips to valid range.)
 pychop_check_etrans_meV = Float64[]
 
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
-pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))
+pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\Users\vdp\AppData\Local\Microsoft\WindowsApps\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
-pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "High Resolution")
-pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "180,60")
+pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "High Flux")
+pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "300,60")
 pychop_freq_hz = isempty(strip(pychop_freq_str)) ? Float64[] : parse.(Float64, split(pychop_freq_str, r"[^0-9eE+\-.]+"; keepempty=false))
 pychop_tc_index = parse(Int, get(ENV, "TOFTWIN_PYCHOP_TC_INDEX", "0"))
 pychop_use_tc_rss = lowercase(get(ENV, "TOFTWIN_PYCHOP_TC_RSS", "0")) in ("1","true","yes")
@@ -342,14 +428,13 @@ ctx = step("setup_powder_ctx", () -> TOFtwin.setup_powder_ctx(;
     pychop_delta_td_us=pychop_delta_td_us,
     pychop_npts=pychop_npts,
     pychop_sigma_q=pychop_sigma_q,
-	pychop_check=pychop_check,
-	pychop_check_etrans_meV=pychop_check_etrans_meV,
+    pychop_check=pychop_check,
+    pychop_check_etrans_meV=pychop_check_etrans_meV,
     ntof_env=ntof_env, ntof_alpha=ntof_alpha, ntof_beta=ntof_beta, ntof_min=ntof_min, ntof_max=ntof_max,
     disk_cache=disk_cache, cache_dir=cache_dir, cache_ver=cache_ver,
     cache_Cv=cache_Cv, cache_rmap=cache_rmap
 ))
 
-# Report PyChop configuration (variant/frequencies/etc) for reproducibility
 if hasproperty(ctx, :pychop_spec) && ctx.pychop_spec !== nothing
     @info "PyChop model spec" ctx.pychop_spec
 end
@@ -358,14 +443,28 @@ if pychop_check_plot
     step("plot_pychop_resolution_compare", () -> plot_pychop_resolution_compare(ctx))
 end
 
-@info "SETUP complete. ctx pixels=$(length(ctx.pixels)) grouping='$(grouping)' mask='$(mask_btp)' res_mode='$(res_mode)'"
+@info "SETUP complete. ctx pixels=$(length(ctx.pixels)) grouping='$(grouping)' mask='$(mask_btp)' res_mode='$(res_mode)' kernel='$(kernel_kind)'"
 
-for (i, spath) in enumerate(sunny_paths)
-    kern = (i == 1) ? kern0 : step("load Sunny kernel", () -> load_sunny_powder_jld2(spath; outside=0.0))
+if kernel_kind == "sunny"
+    for (i, spath) in enumerate(sunny_paths)
+        kern = (i == 1) ? kern0 : step("load Sunny kernel", () -> load_sunny_powder_jld2(spath; outside=0.0))
+        model = (q,w) -> kern(q,w)
+
+        tag = "k$(i)"
+        @info "EVALUATE kernel $i / $(length(sunny_paths))" path=spath
+
+        local pred = step("eval_powder", () -> TOFtwin.eval_powder(ctx, model; do_hist=do_hist))
+
+        if do_hist
+            plot_result(ctx, kern, pred; tag=tag)
+        end
+    end
+else
+    # single evaluation for artificial kernel
+    kern = kern0
     model = (q,w) -> kern(q,w)
-
-    tag = "k$(i)"
-    @info "EVALUATE kernel $i / $(length(sunny_paths))" path=spath
+    tag = "delta"
+    @info "EVALUATE artificial kernel" tag=tag
 
     local pred = step("eval_powder", () -> TOFtwin.eval_powder(ctx, model; do_hist=do_hist))
 
