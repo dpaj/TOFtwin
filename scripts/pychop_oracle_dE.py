@@ -379,6 +379,28 @@ def _parse_freq(freq_str: str) -> List[float]:
     return out
 
 
+
+# ----------------------------
+# Distance mapping helper (CNCS/SEQUOIA-safe)
+# ----------------------------
+def choose_x_start(x0_m: float, xm_m: float, *, xm_margin_m: float = 0.5) -> Tuple[float, bool]:
+    """Choose the 'incident start' distance used in the simplified timing propagation.
+
+    PyChop instrument definitions often provide:
+      - x0: moderator -> energy-defining chopper
+      - xm: moderator -> upstream pulse-defining element (optional)
+
+    CNCS-like "two-stage" definitions typically have xm < x0 by many meters.
+    Some instruments/YAMLs (e.g. SEQUOIA in many PyChop versions) have xm == x0,
+    meaning there is no distinct upstream element in the model; in that case we
+    fall back to moderator start (x_start = 0).
+
+    Returns:
+      (x_start_m, use_xm_as_start)
+    """
+    use_xm_as_start = (xm_m > 0.0) and (x0_m > xm_m) and ((x0_m - xm_m) > xm_margin_m)
+    return (xm_m if use_xm_as_start else 0.0), use_xm_as_start
+
 # ----------------------------
 # Explicit ΔE model
 # ----------------------------
@@ -536,24 +558,41 @@ def main(argv: List[str]) -> int:
         dtc2 = _get_width2_list(inst.chopper_system.getWidthSquared(Ei))
 
         x0, xa, x1, x2, xm = inst.chopper_system.getDistances()
-        x0 = float(x0)
-        xm = float(xm)
+        x0 = float(x0); xa = float(xa); x1 = float(x1); x2 = float(x2); xm = float(xm)
 
-        L1 = float(x0 - xm)
-        L2 = float(x1)
-        L3 = float(x2)
+        if x0 == 0.0:
+            raise ValueError("x0 returned by PyChop is 0; cannot compute delta_tp scaling.")
 
-        delta_tp = math.sqrt(dtm2) * (1.0 - (xm / x0))
+        # Choose incident start (CNCS-like two-stage uses xm; SEQUOIA often falls back to moderator start)
+        x_start, use_xm_as_start = choose_x_start(x0, xm, xm_margin_m=0.5)
+
+        # Map to L1/L2/L3 used by the explicit timing-propagation formulas
+        L1 = float(x0 - x_start)   # start -> energy-defining chopper
+        L2 = float(x1)             # chopper -> sample
+        L3 = float(x2)             # sample -> detector
+
+        if not (L1 > 0.0 and L2 > 0.0 and L3 > 0.0):
+            raise ValueError(
+                f"Non-positive distance(s) for explicit model: L1={L1}, L2={L2}, L3={L3}. "
+                f"(raw: x0={x0}, xm={xm}, x1={x1}, x2={x2}; x_start={x_start})"
+            )
+
+        # Moderator pulse contribution. In single-stage case (x_start=0): delta_tp = sqrt(dtm2).
+        delta_tp = math.sqrt(dtm2) * (1.0 - (x_start / x0))
 
         if dtc2.size == 0:
             raise RuntimeError("PyChop chopper_system.getWidthSquared(Ei) returned empty dtc2.")
 
         if use_tc_rss:
-            delta_tc = math.sqrt(float(np.sum(dtc2)))
+            delta_tc = math.sqrt(float(np.nansum(dtc2)))
         else:
             if tc_index < 0 or tc_index >= dtc2.size:
                 raise ValueError(f"tc-index out of range: {tc_index} (len(dtc2)={dtc2.size})")
-            delta_tc = math.sqrt(float(dtc2[tc_index]))
+            val = float(dtc2[tc_index])
+            if not np.isfinite(val):
+                finite = [float(v) for v in dtc2 if np.isfinite(v)]
+                val = finite[0] if finite else float("nan")
+            delta_tc = math.sqrt(val)
 
         delta_td = float(delta_td_us) * 1e-6
 
@@ -563,7 +602,7 @@ def main(argv: List[str]) -> int:
         explicit_diag = {
             "dtm2_s2": dtm2,
             "dtc2_s2": dtc2.tolist(),
-            "distances_m": {"x0": float(x0), "xm": float(xm), "x1": float(x1), "x2": float(x2), "xa": float(xa)},
+            "distances_m": {"x0": float(x0), "xm": float(xm), "x_start": float(x_start), "use_xm_as_start": bool(use_xm_as_start), "x1": float(x1), "x2": float(x2), "xa": float(xa)},
             "L_m": {"L1": float(L1), "L2": float(L2), "L3": float(L3)},
             "delta_tp_us": float(delta_tp * 1e6),
             "delta_tc_us": float(delta_tc * 1e6),
@@ -590,7 +629,7 @@ def main(argv: List[str]) -> int:
     if explicit_diag:
         hdr.append(f"# dtm2_s2={explicit_diag['dtm2_s2']:.8g} dtc2_s2={explicit_diag['dtc2_s2']}")
         d = explicit_diag["distances_m"]
-        hdr.append(f"# distances_m x0={d['x0']:.6g} xm={d['xm']:.6g} x1={d['x1']:.6g} x2={d['x2']:.6g} xa={d['xa']:.6g}")
+        hdr.append(f"# distances_m x0={d['x0']:.6g} xm={d['xm']:.6g} x_start={d.get('x_start', float('nan')):.6g} x1={d['x1']:.6g} x2={d['x2']:.6g} xa={d['xa']:.6g}")
         L = explicit_diag["L_m"]
         hdr.append(f"# L_m L1={L['L1']:.6g} L2={L['L2']:.6g} L3={L['L3']:.6g}")
         hdr.append(f"# deltas_us tp={explicit_diag['delta_tp_us']:.6g} tc={explicit_diag['delta_tc_us']:.6g} td={explicit_diag['delta_td_us']:.6g}")

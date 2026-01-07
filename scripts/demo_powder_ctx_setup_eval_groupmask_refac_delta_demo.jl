@@ -152,7 +152,7 @@ end
 # Instrument selection
 # -----------------------------
 function parse_instrument()
-    s = uppercase(get(ENV, "TOFTWIN_INSTRUMENT", "CNCS"))
+    s = uppercase(get(ENV, "TOFTWIN_INSTRUMENT", "SEQUOIA"))
     if s in ("CNCS",)
         return :CNCS
     elseif s in ("SEQUOIA", "SEQ")
@@ -319,7 +319,7 @@ end
 #   TOFTWIN_KERNEL=delta TOFTWIN_DELTA_SIGMA_Q=0.02 TOFTWIN_DELTA_SIGMA_W=0.02 ...
 # -----------------------------------------------------------------------------
 
-kernel_kind = lowercase(strip(get(ENV, "TOFTWIN_KERNEL", "sunny")))
+kernel_kind = lowercase(strip(get(ENV, "TOFTWIN_KERNEL", "delta")))
 
 instr = parse_instrument()
 idf_path = instr === :CNCS ? joinpath(@__DIR__, "CNCS_Definition_2025B.xml") :
@@ -385,8 +385,8 @@ pychop_check_etrans_meV = Float64[]
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
 pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\Users\vdp\AppData\Local\Microsoft\WindowsApps\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
-pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "High Flux")
-pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "300,60")
+pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "SEQ-100-2.0-AST") #"High Flux"
+pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "600") #"300,60"
 pychop_freq_hz = isempty(strip(pychop_freq_str)) ? Float64[] : parse.(Float64, split(pychop_freq_str, r"[^0-9eE+\-.]+"; keepempty=false))
 pychop_tc_index = parse(Int, get(ENV, "TOFTWIN_PYCHOP_TC_INDEX", "0"))
 pychop_use_tc_rss = lowercase(get(ENV, "TOFTWIN_PYCHOP_TC_RSS", "0")) in ("1","true","yes")

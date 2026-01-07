@@ -192,7 +192,7 @@ nsigma   = parse(Float64, get(ENV, "TOFTWIN_NSIGMA", "4.0"))
 # Timing width source:
 #   TOFTWIN_SIGMA_T_SOURCE=manual (default) -> use TOFTWIN_SIGMA_T_US
 #   TOFTWIN_SIGMA_T_SOURCE=pychop          -> derive an *effective* σt(t) curve from PyChop ΔE(ω)
-σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "pychop"))
+σt_source = lowercase(get(ENV, "TOFTWIN_SIGMA_T_SOURCE", "env"))
 
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
 pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))

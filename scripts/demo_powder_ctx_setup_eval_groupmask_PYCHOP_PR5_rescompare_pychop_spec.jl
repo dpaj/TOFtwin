@@ -269,7 +269,7 @@ sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_
 
 kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
 
-default_Ei = instr === :SEQUOIA ? "30.0" : "25.0"
+default_Ei = instr === :SEQUOIA ? "30.0" : "12.0"
 Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
 nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
@@ -299,7 +299,7 @@ pychop_check_etrans_meV = Float64[]
 # PyChop oracle script (used when TOFTWIN_SIGMA_T_SOURCE=pychop)
 pychop_python = get(ENV, "TOFTWIN_PYCHOP_PYTHON", get(ENV, "PYTHON", Sys.iswindows() ? raw"C:\\Users\\vdp\\AppData\\Local\\Microsoft\\WindowsApps\\python3.11.exe" : "python3"))
 pychop_script = get(ENV, "TOFTWIN_PYCHOP_SCRIPT", joinpath(@__DIR__, "pychop_oracle_dE.py"))
-pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "High Resolution")
+pychop_variant = get(ENV, "TOFTWIN_PYCHOP_VARIANT", "High Flux")
 pychop_freq_str = get(ENV, "TOFTWIN_PYCHOP_FREQ_HZ", "180,60")
 pychop_freq_hz = isempty(strip(pychop_freq_str)) ? Float64[] : parse.(Float64, split(pychop_freq_str, r"[^0-9eE+\-.]+"; keepempty=false))
 pychop_tc_index = parse(Int, get(ENV, "TOFTWIN_PYCHOP_TC_INDEX", "0"))

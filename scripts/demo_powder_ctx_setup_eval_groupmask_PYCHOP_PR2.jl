@@ -175,7 +175,7 @@ sunny_paths = length(ARGS) > 0 ? ARGS : [joinpath(@__DIR__, "..", "sunny_powder_
 
 kern0 = step("load Sunny kernel (axes anchor)", () -> load_sunny_powder_jld2(sunny_paths[1]; outside=0.0))
 
-default_Ei = instr === :SEQUOIA ? "30.0" : "25.0"
+default_Ei = instr === :SEQUOIA ? "30.0" : "6.59"
 Ei = parse(Float64, get(ENV, "TOFTWIN_EI", default_Ei))  # meV
 
 nQbins = parse(Int, get(ENV, "TOFTWIN_NQBINS", "220"))
