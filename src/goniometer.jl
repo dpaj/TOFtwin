@@ -25,3 +25,21 @@ function R_SL(g::Goniometer, θ::Float64)
             error("axis must be :x, :y, or :z")
     return g.R0_SL * Rscan
 end
+
+"""Return a vector of lab->sample rotations for a scan over angles in degrees.
+
+Angles are interpreted as the motor angle θ (deg). Internally we use `R_SL(g, deg2rad(θ))`.
+"""
+function R_SL_scan(g::Goniometer, angles_deg::AbstractVector{<:Real})
+    return [R_SL(g, deg2rad(Float64(a))) for a in angles_deg]
+end
+
+"""Convenience: build a uniform angle grid [start_deg, stop_deg] inclusive (like `start:step:stop`)
+and return the corresponding R_SL list.
+
+Returns a NamedTuple `(angles_deg, R_SL_list)`.
+"""
+function R_SL_scan(g::Goniometer; start_deg::Real, stop_deg::Real, step_deg::Real)
+    ang = collect(Float64(start_deg):Float64(step_deg):Float64(stop_deg))
+    return (angles_deg=ang, R_SL_list=R_SL_scan(g, ang))
+end

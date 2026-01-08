@@ -16,6 +16,13 @@ struct LatticeParams
     γ::Float64
 end
 
+# Convenience keyword constructor (handy for TOML-driven configs)
+LatticeParams(; a, b, c, α, β, γ) = LatticeParams(Float64(a), Float64(b), Float64(c),
+                                                Float64(α), Float64(β), Float64(γ))
+
+# ASCII aliases (easier to type in configs): alpha/beta/gamma
+LatticeParams(; a, b, c, alpha, beta, gamma) = LatticeParams(; a=a, b=b, c=c, α=alpha, β=beta, γ=gamma)
+
 """
 Reciprocal lattice basis vectors (Å⁻¹) including 2π.
 Q = h*a* + k*b* + l*c*
@@ -60,6 +67,15 @@ function reciprocal_lattice(lp::LatticeParams)
     cstar = 2π * cross(a1, a2) / V
 
     return ReciprocalLattice(astar, bstar, cstar)
+end
+
+# Convenience keyword constructor: build reciprocal basis from lattice parameters
+function ReciprocalLattice(; a::Real, b::Real, c::Real, α::Real, β::Real, γ::Real)
+    return reciprocal_lattice(LatticeParams(; a=a, b=b, c=c, α=α, β=β, γ=γ))
+end
+
+function ReciprocalLattice(; a::Real, b::Real, c::Real, alpha::Real, beta::Real, gamma::Real)
+    return ReciprocalLattice(; a=a, b=b, c=c, α=alpha, β=beta, γ=gamma)
 end
 
 "Convert Q (Å⁻¹) to (H,K,L) using reciprocal basis."

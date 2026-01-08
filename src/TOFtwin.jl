@@ -112,4 +112,6 @@ export build_reduce_map_powder
 
 export PowderWorkflowConfig, powder_config_from_env
 
+export R_SL_scan
+
 end

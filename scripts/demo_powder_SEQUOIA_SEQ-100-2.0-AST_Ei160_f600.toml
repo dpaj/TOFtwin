@@ -46,9 +46,9 @@ psi_stride = 1          # TOFTWIN_PSI_STRIDE
 eta_stride = 1          # TOFTWIN_ETA_STRIDE
 
 [kernel]
-kind = "delta"          # "sunny" | "delta"   (TOFTWIN_KERNEL)
+kind = "sunny"          # "sunny" | "delta"   (TOFTWIN_KERNEL)
 # For kind="sunny": you can list 1..N kernel files; if empty, demo uses default.
-sunny_paths = []        # if running from scripts/, default is ../sunny_powder_corh2o4.jld2
+sunny_paths = ["..\\out\\sunny_powder_bzro_seq160.jld2"]        # if running from scripts/, default is ../sunny_powder_corh2o4.jld2
 
 # For kind="delta": controls match the original demo's env knobs.
 Qmin = 0.0              # TOFTWIN_KERN_QMIN

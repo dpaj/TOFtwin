@@ -25,8 +25,9 @@ const _CFG_PATH = let
     if length(ARGS) >= 1 && endswith(lowercase(ARGS[1]), ".toml")
         abspath(ARGS[1])
     else
-        #abspath(get(ENV, "TOFTWIN_CONFIG", joinpath(@__DIR__, "demo_powder_CNCS_HighFlux_Ei12_f300-60.toml")))
-        abspath(get(ENV, "TOFTWIN_CONFIG", joinpath(@__DIR__, "demo_powder_SEQUOIA_SEQ-100-2.0-AST_Ei160_f600.toml")))
+        abspath(get(ENV, "TOFTWIN_CONFIG", joinpath(@__DIR__, "demo_powder_CNCS_HighFlux_Ei12_f300-60.toml")))
+        #abspath(get(ENV, "TOFTWIN_CONFIG", joinpath(@__DIR__, "demo_powder_CNCS_HighFlux_Ei3.32_f300-60.toml")))
+        #abspath(get(ENV, "TOFTWIN_CONFIG", joinpath(@__DIR__, "demo_powder_SEQUOIA_SEQ-100-2.0-AST_Ei160_f600.toml")))
     end
 end
 

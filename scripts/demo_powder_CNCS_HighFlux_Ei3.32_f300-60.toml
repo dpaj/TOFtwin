@@ -27,7 +27,7 @@ cache_rmap = false      # TOFTWIN_CACHE_RMAP
 
 [instrument]
 name = "CNCS"        # "CNCS" | "SEQUOIA" | "SEQ"  (TOFTWIN_INSTRUMENT)
-Ei_meV = 12.0           # TOFTWIN_EI
+Ei_meV = 3.32           # TOFTWIN_EI
 rebuild_geom = false    # TOFTWIN_REBUILD_GEOM
 # Optional explicit IDF override. If empty, demo chooses based on instrument name.
 idf_path = ""           # TOFTWIN_IDF_PATH (not in original demo, but useful)
@@ -48,13 +48,13 @@ eta_stride = 1          # TOFTWIN_ETA_STRIDE
 [kernel]
 kind = "sunny"          # "sunny" | "delta"   (TOFTWIN_KERNEL)
 # For kind="sunny": you can list 1..N kernel files; if empty, demo uses default.
-sunny_paths = ["..\\out\\sunny_powder_bzro_cncs12.jld2"]        # if running from scripts/, default is ../sunny_powder_corh2o4.jld2
+sunny_paths = ["..\\out\\sunny_powder_bzro_cncs3p32.jld2"]        # if running from scripts/, default is ../sunny_powder_corh2o4.jld2
 
 # For kind="delta": controls match the original demo's env knobs.
 Qmin = 0.0              # TOFTWIN_KERN_QMIN
 Qmax = 6.0              # TOFTWIN_KERN_QMAX
 wmin = 0.0              # TOFTWIN_KERN_WMIN
-wmax = 12.0              # TOFTWIN_KERN_WMAX (often set to Ei)
+wmax = 3.32              # TOFTWIN_KERN_WMAX (often set to Ei)
 
 delta_dQ = 0.5          # TOFTWIN_DELTA_DQ
 delta_dW = 1.0          # TOFTWIN_DELTA_DW

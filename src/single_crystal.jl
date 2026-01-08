@@ -584,3 +584,241 @@ function predict_cut_mean_Hω_hkl_scan_aligned(inst::Instrument;
 
     return (Hsum=Hsum, Hwt=Hwt, Hmean=Hmean)
 end
+
+# =============================================================================
+# Workflow-style single-crystal wrapper (mirrors PowderCtx / eval_powder pattern)
+# =============================================================================
+
+"""
+`SingleCrystalCtx` is the single-crystal analogue of `PowderCtx`.
+
+**Intent:** pay one-time costs once (pixel geometry already in `inst`, and optionally
+(pixel,TOF)->(Q_L,ω,jacdt) precompute), then evaluate many kernel models cheaply.
+
+Typical usage:
+```julia
+ctx = setup_singlecrystal_ctx(; inst, pixels, Ei_meV, tof_edges_s, H_edges, ω_edges,
+                              aln, R_SL_list, K_center=0, K_halfwidth=0.1,
+                              L_center=0, L_halfwidth=0.1)
+
+pred = eval_singlecrystal!(ctx, model_hkl)  # overwrites ctx output hists
+pred2 = eval_singlecrystal!(ctx, model_hkl2)
+```
+"""
+mutable struct SingleCrystalCtx{TRes,TKin,TR}
+    inst::Instrument
+    pixels::Vector{DetectorPixel}
+    Ei_meV::Float64
+    tof_edges_s::Vector{Float64}
+
+    # Cut definition
+    H_edges::Vector{Float64}
+    ω_edges::Vector{Float64}
+    aln::SampleAlignment
+    R_SL_list::Vector{TR}
+
+    # Selection window in K/L (r.l.u.)
+    K_center::Float64
+    K_halfwidth::Float64
+    L_center::Float64
+    L_halfwidth::Float64
+
+    # Numerical controls
+    resolution::TRes
+    eps::Float64
+
+    # Cached kinematics for fast path (only when resolution isa NoResolution)
+    kin::TKin
+
+    # Preallocated accumulators (thread-local + reduced)
+    Hsum_thr::Vector{Hist2D}
+    Hwt_thr::Vector{Hist2D}
+    Hsum::Hist2D
+    Hwt::Hist2D
+    Hmean::Hist2D
+end
+
+"""Create a `SingleCrystalCtx`. This does **not** load geometry; pass an `inst` whose pixels are already loaded."""
+function setup_singlecrystal_ctx(; 
+    inst::Instrument,
+    pixels::AbstractVector{DetectorPixel},
+    Ei_meV::Real,
+    tof_edges_s::AbstractVector{<:Real},
+    H_edges::AbstractVector{<:Real},
+    ω_edges::AbstractVector{<:Real},
+    aln::SampleAlignment,
+    R_SL_list::AbstractVector,
+    resolution::AbstractResolutionModel = NoResolution(),
+    eps::Real = 1e-12,
+    K_center::Real = 0.0,
+    K_halfwidth::Real = 0.1,
+    L_center::Real = 0.0,
+    L_halfwidth::Real = 0.1,
+)
+    pix = Vector{DetectorPixel}(pixels)
+    tof = collect(Float64, tof_edges_s)
+    Hed = collect(Float64, H_edges)
+    wed = collect(Float64, ω_edges)
+
+    # Fast-path cache (only valid if there is no additional timing quadrature).
+    kin = (resolution isa NoResolution) ? precompute_pixel_tof_kinematics(inst, pix, Float64(Ei_meV), tof) : nothing
+
+    TR = eltype(collect(R_SL_list))
+    Rlist = Vector{TR}(R_SL_list)
+
+    Hsum_thr = [Hist2D(Hed, wed) for _ in 1:nthreads()]
+    Hwt_thr  = [Hist2D(Hed, wed) for _ in 1:nthreads()]
+    Hsum = Hist2D(Hed, wed)
+    Hwt  = Hist2D(Hed, wed)
+    Hmean = Hist2D(Hed, wed)
+
+    return SingleCrystalCtx(inst, pix, Float64(Ei_meV), tof,
+                            Hed, wed, aln, Rlist,
+                            Float64(K_center), Float64(K_halfwidth),
+                            Float64(L_center), Float64(L_halfwidth),
+                            resolution, Float64(eps),
+                            kin,
+                            Hsum_thr, Hwt_thr, Hsum, Hwt, Hmean)
+end
+
+@inline function _zero_hist!(H::Hist2D)
+    fill!(H.counts, 0.0)
+    return H
+end
+
+"""Evaluate a single-crystal kernel model into the preallocated histograms stored in `ctx` (mutating)."""
+function eval_singlecrystal!(ctx::SingleCrystalCtx, model_hkl; threaded::Bool=true)
+    # zero thread-local accumulators
+    @inbounds for k in 1:length(ctx.Hsum_thr)
+        _zero_hist!(ctx.Hsum_thr[k])
+        _zero_hist!(ctx.Hwt_thr[k])
+    end
+
+    inst = ctx.inst
+    pixels = ctx.pixels
+    Ei_meV = ctx.Ei_meV
+    tof_edges_s = ctx.tof_edges_s
+    aln = ctx.aln
+
+    K_center = ctx.K_center
+    K_halfwidth = ctx.K_halfwidth
+    L_center = ctx.L_center
+    L_halfwidth = ctx.L_halfwidth
+
+    kin = ctx.kin
+    if kin !== nothing
+        QLx, QLy, QLz = kin.QLx, kin.QLy, kin.QLz
+        ωL, jacdt = kin.ωL, kin.jacdt
+        itmin, itmax = kin.itmin, kin.itmax
+    end
+
+    np = length(pixels)
+    resolution = ctx.resolution
+
+    function do_one_orientation!(R_SL)
+        tid = threadid()
+        Hsum = ctx.Hsum_thr[tid]
+        Hwt  = ctx.Hwt_thr[tid]
+
+        if kin !== nothing
+            @inbounds for ip in 1:np
+                hi = itmax[ip]
+                hi == 0 && continue
+                lo = itmin[ip]
+
+                for it in lo:hi
+                    w = jacdt[ip,it]
+                    w == 0.0 && continue
+
+                    # Q_S = R_SL * Q_L
+                    qlx = QLx[ip,it]; qly = QLy[ip,it]; qlz = QLz[ip,it]
+                    qsx = R_SL[1,1]*qlx + R_SL[1,2]*qly + R_SL[1,3]*qlz
+                    qsy = R_SL[2,1]*qlx + R_SL[2,2]*qly + R_SL[2,3]*qlz
+                    qsz = R_SL[3,1]*qlx + R_SL[3,2]*qly + R_SL[3,3]*qlz
+                    Q_S = Vec3(qsx, qsy, qsz)
+
+                    ω = ωL[ip,it]
+                    hkl = hkl_from_Q_S(aln, Q_S)
+                    Hh, Kk, Ll = hkl
+
+                    (abs(Kk - K_center) > K_halfwidth) && continue
+                    (abs(Ll - L_center) > L_halfwidth) && continue
+
+                    deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
+                    deposit_bilinear!(Hwt,  Hh, ω, w)
+                end
+            end
+        else
+            n_tof = length(tof_edges_s) - 1
+            @inbounds for ip in 1:np
+                p = pixels[ip]
+                Ω = pixel_Ω(p)
+                L2p = L2(inst, p.id)
+
+                for it in 1:n_tof
+                    t0 = Float64(tof_edges_s[it])
+                    t1 = Float64(tof_edges_s[it+1])
+                    t  = 0.5*(t0 + t1)
+                    dt = (t1 - t0)
+
+                    δts, ws = time_nodes_weights(resolution, inst, p, Ei_meV, t)
+                    for j in 1:length(δts)
+                        tj = t + δts[j]
+                        Ef = try
+                            Ef_from_tof(inst.L1, L2p, Ei_meV, tj)
+                        catch
+                            continue
+                        end
+                        (Ef <= 0 || Ef > Ei_meV) && continue
+
+                        Q_L, ω = Qω_from_pixel(p.r_L, Ei_meV, Ef; r_samp_L=inst.r_samp_L)
+
+                        # Q_S = R_SL * Q_L
+                        qsx = R_SL[1,1]*Q_L[1] + R_SL[1,2]*Q_L[2] + R_SL[1,3]*Q_L[3]
+                        qsy = R_SL[2,1]*Q_L[1] + R_SL[2,2]*Q_L[2] + R_SL[2,3]*Q_L[3]
+                        qsz = R_SL[3,1]*Q_L[1] + R_SL[3,2]*Q_L[2] + R_SL[3,3]*Q_L[3]
+                        Q_S = Vec3(qsx, qsy, qsz)
+
+                        hkl = hkl_from_Q_S(aln, Q_S)
+                        Hh, Kk, Ll = hkl
+                        (abs(Kk - K_center) > K_halfwidth) && continue
+                        (abs(Ll - L_center) > L_halfwidth) && continue
+
+                        w = ws[j] * abs(dω_dt(inst.L1, L2p, Ei_meV, tj)) * dt * Ω
+                        deposit_bilinear!(Hsum, Hh, ω, model_hkl(hkl, ω) * w)
+                        deposit_bilinear!(Hwt,  Hh, ω, w)
+                    end
+                end
+            end
+        end
+        return nothing
+    end
+
+    R_SL_list = ctx.R_SL_list
+    if threaded && nthreads() > 1
+        @threads for i in eachindex(R_SL_list)
+            do_one_orientation!(R_SL_list[i])
+        end
+    else
+        for R in R_SL_list
+            do_one_orientation!(R)
+        end
+    end
+
+    _zero_hist!(ctx.Hsum)
+    _zero_hist!(ctx.Hwt)
+    @inbounds for k in 1:length(ctx.Hsum_thr)
+        ctx.Hsum.counts .+= ctx.Hsum_thr[k].counts
+        ctx.Hwt.counts  .+= ctx.Hwt_thr[k].counts
+    end
+
+    ctx.Hmean.counts .= ctx.Hsum.counts ./ (ctx.Hwt.counts .+ ctx.eps)
+
+    return (Hsum=ctx.Hsum, Hwt=ctx.Hwt, Hmean=ctx.Hmean)
+end
+
+"""Non-mutating convenience wrapper: returns a deep copy of the results."""
+function eval_singlecrystal(ctx::SingleCrystalCtx, model_hkl; threaded::Bool=true)
+    pred = eval_singlecrystal!(ctx, model_hkl; threaded=threaded)
+    return (Hsum=deepcopy(pred.Hsum), Hwt=deepcopy(pred.Hwt), Hmean=deepcopy(pred.Hmean))
+end
