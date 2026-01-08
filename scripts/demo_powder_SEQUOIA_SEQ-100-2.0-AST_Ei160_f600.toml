@@ -1,0 +1,96 @@
+# -----------------------------------------------------------------------------
+# TOFtwin powder demo configuration (full)
+#
+# This TOML mirrors the knobs in:
+#   scripts/demo_powder_ctx_setup_eval_groupmask_refac_delta_demo.jl
+#
+# Usage (example):
+#   julia --project=. scripts/demo_powder_from_toml.jl demo_powder_config_full.toml
+#
+# Optional env overrides still work (TOFTWIN_*) for quick one-off changes.
+# -----------------------------------------------------------------------------
+
+[run]
+backend = "gl"          # "gl" | "cairo"
+profile = false         # TOFTWIN_PROFILE
+do_hist = true          # TOFTWIN_DO_HIST
+plot_kernel = true      # TOFTWIN_PLOT_KERNEL
+save = true             # TOFTWIN_SAVE
+outdir = "out"          # TOFTWIN_OUTDIR (relative paths resolve relative to config file)
+
+[cache]
+disk_cache = true       # TOFTWIN_DISK_CACHE
+cache_dir = ".toftwin_cache"   # TOFTWIN_CACHE_DIR
+cache_version = "ctx_v2"       # TOFTWIN_CACHE_VERSION
+cache_Cv = false        # TOFTWIN_CACHE_CV
+cache_rmap = false      # TOFTWIN_CACHE_RMAP
+
+[instrument]
+name = "SEQUOIA"        # "CNCS" | "SEQUOIA" | "SEQ"  (TOFTWIN_INSTRUMENT)
+Ei_meV = 160.0           # TOFTWIN_EI
+rebuild_geom = false    # TOFTWIN_REBUILD_GEOM
+# Optional explicit IDF override. If empty, demo chooses based on instrument name.
+idf_path = ""           # TOFTWIN_IDF_PATH (not in original demo, but useful)
+
+[grouping_masking]
+grouping = "4x2"        # TOFTWIN_GROUPING
+grouping_file = ""      # TOFTWIN_GROUPING_FILE (optional path)
+mask_btp = "Bank=36-50" # TOFTWIN_MASK_BTP
+mask_mode = "drop"      # TOFTWIN_MASK_MODE: "drop" | "zeroΩ"
+powder_anglestep_deg = 0.5   # TOFTWIN_POWDER_ANGLESTEP
+
+[bins]
+nQbins = 420            # TOFTWIN_NQBINS
+nWbins = 440            # TOFTWIN_NWBINS
+psi_stride = 1          # TOFTWIN_PSI_STRIDE
+eta_stride = 1          # TOFTWIN_ETA_STRIDE
+
+[kernel]
+kind = "delta"          # "sunny" | "delta"   (TOFTWIN_KERNEL)
+# For kind="sunny": you can list 1..N kernel files; if empty, demo uses default.
+sunny_paths = []        # if running from scripts/, default is ../sunny_powder_corh2o4.jld2
+
+# For kind="delta": controls match the original demo's env knobs.
+Qmin = 0.0              # TOFTWIN_KERN_QMIN
+Qmax = 6.0              # TOFTWIN_KERN_QMAX
+wmin = 0.0              # TOFTWIN_KERN_WMIN
+wmax = 160.0              # TOFTWIN_KERN_WMAX (often set to Ei)
+
+delta_dQ = 0.5          # TOFTWIN_DELTA_DQ
+delta_dW = 1.0          # TOFTWIN_DELTA_DW
+delta_sigma_Q = 0.03    # TOFTWIN_DELTA_SIGMA_Q
+delta_sigma_W = 0.03    # TOFTWIN_DELTA_SIGMA_W
+delta_fine_dQ = 0.025   # TOFTWIN_DELTA_FINE_DQ
+delta_fine_dW = 0.05    # TOFTWIN_DELTA_FINE_DW
+delta_amp = 1.0         # TOFTWIN_DELTA_AMP
+
+[resolution]
+res_mode = "cdf"        # TOFTWIN_RES_MODE
+sigma_t_us = 10.0       # TOFTWIN_SIGMA_T_US
+gh_order = 3            # TOFTWIN_GH_ORDER
+nsigma = 4.0            # TOFTWIN_NSIGMA
+sigma_t_source = "pychop"  # TOFTWIN_SIGMA_T_SOURCE: "manual" | "pychop"
+pychop_check = true     # TOFTWIN_PYCHOP_CHECK
+
+[resolution.pychop]
+python = ""             # TOFTWIN_PYCHOP_PYTHON (or PYTHON). If empty, demo picks platform default.
+script = "pychop_oracle_dE.py"   # TOFTWIN_PYCHOP_SCRIPT (relative to scripts/ by default)
+variant = "SEQ-100-2.0-AST"      # TOFTWIN_PYCHOP_VARIANT
+freq_hz = [600.0]       # TOFTWIN_PYCHOP_FREQ_HZ (can be [300.0, 60.0] etc.)
+tc_index = 0            # TOFTWIN_PYCHOP_TC_INDEX
+use_tc_rss = false      # TOFTWIN_PYCHOP_TC_RSS
+delta_td_us = 0.0       # TOFTWIN_PYCHOP_DELTA_TD_US
+npts = 401              # TOFTWIN_PYCHOP_NPTS
+sigma_q = 0.25          # TOFTWIN_PYCHOP_SIGMA_Q
+
+[resolution.check_plot]
+enable = false          # TOFTWIN_PYCHOP_CHECK_PLOT
+npts = 121              # TOFTWIN_PYCHOP_CHECK_PLOT_NPTS
+npix = 3                # TOFTWIN_PYCHOP_CHECK_PLOT_NPIX
+
+[ntof]
+mode = "auto"           # TOFTWIN_NTOF
+alpha = 0.5             # TOFTWIN_NTOF_ALPHA
+beta = 0.333333333333   # TOFTWIN_NTOF_BETA
+min = 200               # TOFTWIN_NTOF_MIN
+max = 2000              # TOFTWIN_NTOF_MAX

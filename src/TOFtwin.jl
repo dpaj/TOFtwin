@@ -34,6 +34,9 @@ include("view_detector.jl")
 include("mantid_idf.jl")
 include("workflows_common.jl")
 include("workflows_powder.jl")
+
+include("powder_workflow_config.jl")
+
 using .MantidIDF: load_mantid_idf,
                  load_mantid_idf_cached,
                  load_mantid_idf_diskcached,
@@ -106,5 +109,7 @@ export apply_grouping_masking
 export PowderCtx, ReduceMapPowder
 export setup_powder_ctx, eval_powder
 export build_reduce_map_powder
+
+export PowderWorkflowConfig, powder_config_from_env
 
 end

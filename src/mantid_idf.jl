@@ -22,7 +22,7 @@ _norm_r_override(x) = x === nothing ? nothing : (Float64(x[1]), Float64(x[2]), F
 # Disk cache (persists across Julia sessions)
 # -------------------------
 
-const _IDF_DISKCACHE_VERSION = 1
+const _IDF_DISKCACHE_VERSION = 2
 
 """A small fingerprint so we can invalidate disk caches when the IDF changes."""
 function _idf_disk_fingerprint(idf_src::AbstractString)
@@ -534,6 +534,28 @@ function load_mantid_idf(idf_src::AbstractString;
     has_det_type = haskey(types, component_type)
 
     # ---- pixel geometry for ΔΩ estimate ----
+    # Many IDFs have multiple detector "pixel" types (e.g. SEQUOIA has pixel, pixel-top, pixel-bottom).
+    # We treat any <type is="detector" ...> as a detector-pixel leaf and allow its radius/height
+    # to influence the (approximate) solid-angle estimate.
+    function _detector_pixel_area(tnode::EzXML.Node)
+        rnode = EzXML.findall(".//*[local-name()='radius']", tnode)
+        hnode = EzXML.findall(".//*[local-name()='height']", tnode)
+        isempty(rnode) && return 0.0
+        isempty(hnode) && return 0.0
+        r = _parsef(_getattr(rnode[1], "val", "0"), 0.0)
+        h = _parsef(_getattr(hnode[1], "val", "0"), 0.0)
+        return (r > 0 && h > 0) ? (2r) * h : 0.0
+    end
+
+    pixel_area_by_type = Dict{String,Float64}()
+    for (nm, tn) in types
+        if _getattr(tn, "is", "") == "detector"
+            a = _detector_pixel_area(tn)
+            a > 0 && (pixel_area_by_type[nm] = a)
+        end
+    end
+
+    # Keep the legacy meta fields based on the canonical "pixel" type when present.
     pix_radius = 0.0
     pix_height = 0.0
     if haskey(types, "pixel")
@@ -544,7 +566,7 @@ function load_mantid_idf(idf_src::AbstractString;
         if !isempty(hnode); pix_height = _parsef(_getattr(hnode[1], "val", "0")); end
     end
 
-    pixel_area = (2*pix_radius) * pix_height
+    default_pixel_area = get(pixel_area_by_type, "pixel", (2*pix_radius) * pix_height)
 
     # ---- expand hierarchy down to pixels ----
     pix_pos  = SVector{3,Float64}[]
@@ -587,14 +609,19 @@ function load_mantid_idf(idf_src::AbstractString;
 
             locs = EzXML.findall("./*[local-name()='location']", comp)
 
+            # Treat any <type is="detector" ...> as a leaf pixel (covers pixel-top/pixel-bottom, etc.)
+            child_tnode = get(types, child_type, nothing)
+            child_is_detector = (child_tnode !== nothing) && (_getattr(child_tnode, "is", "") == "detector")
+
             if isempty(locs)
                 # no explicit placement
-                if child_type == "pixel"
+                if child_type == "pixel" || child_is_detector
                     r_abs = t_parent
                     r_rel = r_abs - r_samp
                     ψ, η = _psi_eta(r_rel)
                     L2 = norm(r_rel)
-                    dΩ = (pixel_area > 0 && L2 > 0) ? pixel_area / (L2^2) : 1.0
+                    area = get(pixel_area_by_type, child_type, default_pixel_area)
+                    dΩ = (area > 0 && L2 > 0) ? area / (L2^2) : 1.0
 
                     push!(pix_pos, center_on_sample ? r_rel : r_abs)
                     push!(pix_bank, bank_sym)
@@ -614,13 +641,14 @@ function load_mantid_idf(idf_src::AbstractString;
                 t_new = t_parent + R_parent * t_loc
                 R_new = R_parent * R_loc
 
-                if child_type == "pixel"
+                if child_type == "pixel" || child_is_detector
                     r_abs = t_new
                     r_rel = r_abs - r_samp
                     ψ, η = _psi_eta(r_rel)
 
                     L2 = norm(r_rel)
-                    dΩ = (pixel_area > 0 && L2 > 0) ? pixel_area / (L2^2) : 1.0
+                    area = get(pixel_area_by_type, child_type, default_pixel_area)
+                    dΩ = (area > 0 && L2 > 0) ? area / (L2^2) : 1.0
 
                     push!(pix_pos, center_on_sample ? r_rel : r_abs)
                     push!(pix_bank, bank_sym)
